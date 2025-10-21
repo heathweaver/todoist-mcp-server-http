@@ -1052,6 +1052,107 @@ const REMOVE_SHARED_LABELS_TOOL: Tool = {
   }
 };
 
+// Comment Tools
+
+const GET_TASK_COMMENTS_TOOL: Tool = {
+  name: "todoist_get_task_comments",
+  description: "Get comments for one or more tasks in Todoist",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tasks: {
+        type: "array",
+        description: "Array of tasks to get comments for (for batch operations)",
+        items: {
+          type: "object",
+          properties: {
+            task_id: {
+              type: "string",
+              description: "ID of the task to get comments for (preferred)"
+            },
+            task_name: {
+              type: "string",
+              description: "Name/content of the task to search for and get comments (if ID not provided)"
+            }
+          },
+          anyOf: [
+            { required: ["task_id"] },
+            { required: ["task_name"] }
+          ]
+        }
+      },
+      // For backward compatibility - single task parameters
+      task_id: {
+        type: "string",
+        description: "ID of the task to get comments for (preferred)"
+      },
+      task_name: {
+        type: "string",
+        description: "Name/content of the task to search for and get comments (if ID not provided)"
+      }
+    },
+    anyOf: [
+      { required: ["tasks"] },
+      { required: ["task_id"] },
+      { required: ["task_name"] }
+    ]
+  }
+};
+
+const CREATE_TASK_COMMENT_TOOL: Tool = {
+  name: "todoist_create_task_comment",
+  description: "Create comments for one or more tasks in Todoist",
+  inputSchema: {
+    type: "object",
+    properties: {
+      comments: {
+        type: "array",
+        description: "Array of comments to create (for batch operations)",
+        items: {
+          type: "object",
+          properties: {
+            task_id: {
+              type: "string",
+              description: "ID of the task to add comment to (preferred)"
+            },
+            task_name: {
+              type: "string",
+              description: "Name/content of the task to search for and add comment (if ID not provided)"
+            },
+            content: {
+              type: "string",
+              description: "The content of the comment"
+            }
+          },
+          required: ["content"],
+          anyOf: [
+            { required: ["task_id"] },
+            { required: ["task_name"] }
+          ]
+        }
+      },
+      // For backward compatibility - single comment parameters
+      task_id: {
+        type: "string",
+        description: "ID of the task to add comment to (preferred)"
+      },
+      task_name: {
+        type: "string",
+        description: "Name/content of the task to search for and add comment (if ID not provided)"
+      },
+      content: {
+        type: "string",
+        description: "The content of the comment"
+      }
+    },
+    anyOf: [
+      { required: ["comments"] },
+      { required: ["task_id", "content"] },
+      { required: ["task_name", "content"] }
+    ]
+  }
+};
+
 // Task Label Tool
 
 const UPDATE_TASK_LABELS_TOOL: Tool = {
@@ -1711,6 +1812,80 @@ function isUpdateTaskLabelsArgs(args: unknown): args is {
   );
 }
 
+// Comment Typeguards
+
+function isGetTaskCommentsArgs(args: unknown): args is {
+  task_id?: string;
+  task_name?: string;
+  tasks?: Array<{
+    task_id?: string;
+    task_name?: string;
+  }>;
+} {
+  if (typeof args !== "object" || args === null) {
+    return false;
+  }
+  
+  // Check if it's a batch operation
+  if ("tasks" in args && Array.isArray((args as any).tasks)) {
+    return (args as any).tasks.every((task: any) => 
+      typeof task === "object" && 
+      task !== null && 
+      (
+        (task.task_id === undefined || typeof task.task_id === "string") &&
+        (task.task_name === undefined || typeof task.task_name === "string") &&
+        (task.task_id !== undefined || task.task_name !== undefined)
+      )
+    );
+  }
+  
+  // Check if it's a single task operation
+  return (
+    (("task_id" in args) && typeof (args as any).task_id === "string") ||
+    (("task_name" in args) && typeof (args as any).task_name === "string")
+  );
+}
+
+function isCreateTaskCommentArgs(args: unknown): args is {
+  task_id?: string;
+  task_name?: string;
+  content?: string;
+  comments?: Array<{
+    task_id?: string;
+    task_name?: string;
+    content: string;
+  }>;
+} {
+  if (typeof args !== "object" || args === null) {
+    return false;
+  }
+  
+  // Check if it's a batch operation
+  if ("comments" in args && Array.isArray((args as any).comments)) {
+    return (args as any).comments.every((comment: any) => 
+      typeof comment === "object" && 
+      comment !== null && 
+      "content" in comment &&
+      typeof comment.content === "string" &&
+      (
+        (comment.task_id === undefined || typeof comment.task_id === "string") &&
+        (comment.task_name === undefined || typeof comment.task_name === "string") &&
+        (comment.task_id !== undefined || comment.task_name !== undefined)
+      )
+    );
+  }
+  
+  // Check if it's a single comment operation
+  return (
+    "content" in args && 
+    typeof (args as any).content === "string" &&
+    (
+      (("task_id" in args) && typeof (args as any).task_id === "string") ||
+      (("task_name" in args) && typeof (args as any).task_name === "string")
+    )
+  );
+}
+
 // List tools Schema
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -1737,7 +1912,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     RENAME_SHARED_LABELS_TOOL,
     REMOVE_SHARED_LABELS_TOOL,
     
-    UPDATE_TASK_LABELS_TOOL
+    UPDATE_TASK_LABELS_TOOL,
+
+    GET_TASK_COMMENTS_TOOL,
+    CREATE_TASK_COMMENT_TOOL
   ],
 }));
 
@@ -3703,6 +3881,316 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 task_id: taskId,
                 content: taskContent || `Task ID: ${taskId}`,
                 labels: args.labels
+              }, null, 2)
+            }],
+            isError: false
+          };
+        }
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error)
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+    }
+
+    // Comment Handlers
+
+    if (name === "todoist_get_task_comments") {
+      if (!isGetTaskCommentsArgs(args)) {
+        throw new Error("Invalid arguments for todoist_get_task_comments");
+      }
+    
+      try {
+        // Process batch comment retrieval
+        if (args.tasks && args.tasks.length > 0) {
+          // Get all tasks in one API call to efficiently search by name
+          const allTasks = await todoistClient.getTasks();
+          
+          const results = await Promise.all(args.tasks.map(async (taskData) => {
+            try {
+              // Determine task ID - either directly provided or find by name
+              let taskId = taskData.task_id;
+              let taskContent = '';
+              
+              if (!taskId && taskData.task_name) {
+                const matchingTask = allTasks.find(task => 
+                  task.content.toLowerCase().includes(taskData.task_name!.toLowerCase())
+                );
+                
+                if (!matchingTask) {
+                  return {
+                    success: false,
+                    error: `Task not found: ${taskData.task_name}`,
+                    task_name: taskData.task_name
+                  };
+                }
+                
+                taskId = matchingTask.id;
+                taskContent = matchingTask.content;
+              }
+              
+              if (!taskId) {
+                return {
+                  success: false,
+                  error: "Either task_id or task_name must be provided",
+                  taskData
+                };
+              }
+    
+              // Get comments for the task
+              const comments = await todoistClient.getComments({ taskId });
+              
+              return {
+                success: true,
+                task_id: taskId,
+                content: taskContent || `Task ID: ${taskId}`,
+                comments: comments.map(comment => ({
+                  id: comment.id,
+                  content: comment.content,
+                  posted_at: comment.postedAt,
+                  posted_by: comment.postedBy
+                }))
+              };
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+                taskData
+              };
+            }
+          }));
+          
+          const successCount = results.filter(r => r.success).length;
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: successCount === args.tasks.length,
+                summary: {
+                  total: args.tasks.length,
+                  succeeded: successCount,
+                  failed: args.tasks.length - successCount
+                },
+                results
+              }, null, 2)
+            }],
+            isError: successCount < args.tasks.length
+          };
+        }
+        // Process single task comment retrieval (backward compatibility)
+        else {
+          // Determine task ID - either directly provided or find by name
+          let taskId = args.task_id;
+          let taskContent = '';
+          
+          if (!taskId && args.task_name) {
+            const tasks = await todoistClient.getTasks();
+            const matchingTask = tasks.find(task => 
+              task.content.toLowerCase().includes(args.task_name!.toLowerCase())
+            );
+            
+            if (!matchingTask) {
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    success: false,
+                    error: `Task not found: ${args.task_name}`
+                  }, null, 2)
+                }],
+                isError: true
+              };
+            }
+            
+            taskId = matchingTask.id;
+            taskContent = matchingTask.content;
+          }
+          
+          if (!taskId) {
+            throw new Error("Either task_id or task_name must be provided");
+          }
+    
+          // Get comments for the task
+          const comments = await todoistClient.getComments({ taskId });
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                task_id: taskId,
+                content: taskContent || `Task ID: ${taskId}`,
+                comments: comments.map(comment => ({
+                  id: comment.id,
+                  content: comment.content,
+                  posted_at: comment.postedAt,
+                  posted_by: comment.postedBy
+                }))
+              }, null, 2)
+            }],
+            isError: false
+          };
+        }
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error)
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+    }
+
+    if (name === "todoist_create_task_comment") {
+      if (!isCreateTaskCommentArgs(args)) {
+        throw new Error("Invalid arguments for todoist_create_task_comment");
+      }
+    
+      try {
+        // Process batch comment creation
+        if (args.comments && args.comments.length > 0) {
+          // Get all tasks in one API call to efficiently search by name
+          const allTasks = await todoistClient.getTasks();
+          
+          const results = await Promise.all(args.comments.map(async (commentData) => {
+            try {
+              // Determine task ID - either directly provided or find by name
+              let taskId = commentData.task_id;
+              let taskContent = '';
+              
+              if (!taskId && commentData.task_name) {
+                const matchingTask = allTasks.find(task => 
+                  task.content.toLowerCase().includes(commentData.task_name!.toLowerCase())
+                );
+                
+                if (!matchingTask) {
+                  return {
+                    success: false,
+                    error: `Task not found: ${commentData.task_name}`,
+                    task_name: commentData.task_name
+                  };
+                }
+                
+                taskId = matchingTask.id;
+                taskContent = matchingTask.content;
+              }
+              
+              if (!taskId) {
+                return {
+                  success: false,
+                  error: "Either task_id or task_name must be provided",
+                  commentData
+                };
+              }
+    
+              // Create comment for the task
+              const comment = await todoistClient.addComment({
+                taskId,
+                content: commentData.content
+              });
+              
+              return {
+                success: true,
+                task_id: taskId,
+                content: taskContent || `Task ID: ${taskId}`,
+                comment: {
+                  id: comment.id,
+                  content: comment.content,
+                  posted_at: comment.postedAt,
+                  posted_by: comment.postedBy
+                }
+              };
+            } catch (error) {
+              return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+                commentData
+              };
+            }
+          }));
+          
+          const successCount = results.filter(r => r.success).length;
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: successCount === args.comments.length,
+                summary: {
+                  total: args.comments.length,
+                  succeeded: successCount,
+                  failed: args.comments.length - successCount
+                },
+                results
+              }, null, 2)
+            }],
+            isError: successCount < args.comments.length
+          };
+        }
+        // Process single comment creation (backward compatibility)
+        else {
+          // Determine task ID - either directly provided or find by name
+          let taskId = args.task_id;
+          let taskContent = '';
+          
+          if (!taskId && args.task_name) {
+            const tasks = await todoistClient.getTasks();
+            const matchingTask = tasks.find(task => 
+              task.content.toLowerCase().includes(args.task_name!.toLowerCase())
+            );
+            
+            if (!matchingTask) {
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    success: false,
+                    error: `Task not found: ${args.task_name}`
+                  }, null, 2)
+                }],
+                isError: true
+              };
+            }
+            
+            taskId = matchingTask.id;
+            taskContent = matchingTask.content;
+          }
+          
+          if (!taskId) {
+            throw new Error("Either task_id or task_name must be provided");
+          }
+    
+          // Create comment for the task
+          const comment = await todoistClient.addComment({
+            taskId,
+            content: args.content
+          });
+          
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                task_id: taskId,
+                content: taskContent || `Task ID: ${taskId}`,
+                comment: {
+                  id: comment.id,
+                  content: comment.content,
+                  posted_at: comment.postedAt,
+                  posted_by: comment.postedBy
+                }
               }, null, 2)
             }],
             isError: false

@@ -88,6 +88,27 @@ For more information about the Todoist API, visit the [official Todoist API docu
 
 3. Claude Desktop client will then start the MCP server and load the tools on the next client (re)start.
 
+## Docker Usage
+
+If you're running this server in Docker (e.g., on Synology), make sure to pass the API token as an environment variable:
+
+```bash
+docker run -e TODOIST_API_TOKEN=your_api_token_here your-image-name
+```
+
+Or using docker-compose:
+
+```yaml
+version: '3.8'
+services:
+  todoist-mcp:
+    image: your-image-name
+    environment:
+      - TODOIST_API_TOKEN=your_api_token_here
+```
+
+**Important**: Never put your API token in the Dockerfile or commit it to git. Always use environment variables or secrets management.
+
 ## Example Usage
 
 Some simple suggestions on what to ask Claude. Note that sometimes you have to be *very* direct to get claude to use the tools:

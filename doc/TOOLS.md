@@ -490,3 +490,81 @@ Remove one or more shared labels from Todoist tasks.
 5. **Priority Levels**: Task priorities range from 1 (normal) to 4 (urgent).
 
 6. **Labels**: Labels can be either personal (stored in your account) or shared (only appear on tasks). The tools allow managing both types.
+
+## Comment Tools
+
+### todoist_get_task_comments
+
+Get comments for one or more tasks in Todoist.
+
+#### Single Task Format
+
+- `task_id` (string): ID of the task to get comments for (preferred)
+- `task_name` (string): Name/content of the task to search for and get comments (if ID not provided)
+
+#### Batch Format
+
+- `tasks` (array): Array of task objects, each containing task_id or task_name
+
+#### Example
+
+```json
+{
+  "task_name": "Review PR"
+}
+```
+
+Or for batch operations:
+
+```json
+{
+  "tasks": [
+    {
+      "task_id": "2995104339"
+    },
+    {
+      "task_name": "Review PR"
+    }
+  ]
+}
+```
+
+### todoist_create_task_comment
+
+Create comments for one or more tasks in Todoist.
+
+#### Single Comment Format
+
+- `task_id` (string): ID of the task to add comment to (preferred)
+- `task_name` (string): Name/content of the task to search for and add comment (if ID not provided)
+- `content` (string, required): The content of the comment
+
+#### Batch Format
+
+- `comments` (array): Array of comment objects, each containing task_id or task_name plus content
+
+#### Example
+
+```json
+{
+  "task_name": "Review PR",
+  "content": "This looks good, just need to fix the typo on line 42"
+}
+```
+
+Or for batch operations:
+
+```json
+{
+  "comments": [
+    {
+      "task_id": "2995104339",
+      "content": "Started working on this"
+    },
+    {
+      "task_name": "Review PR",
+      "content": "This looks good, just need to fix the typo on line 42"
+    }
+  ]
+}
+```
