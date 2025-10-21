@@ -1,7 +1,7 @@
 {
-  "name": "@heathweaver/todoist-mcp-server-extended",
+  "name": "@heathweaver/todoist-mcp-server-http",
   "version": "0.2.5",
-  "description": "Todoist MCP Server Extended, made to be efficient to use for an LLM's like Claude.",
+  "description": "HTTP-based Todoist MCP Server with Docker deployment and GitHub OAuth authentication.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -19,12 +19,12 @@
     "test:watch": "node --test --watch tests/**/*.test.js",
     "prebuild": "npm run build:check",
     "prepack": "npm run build:check && npm test",
-    "docker:build": "npm run build:check && npm test && npm run build && docker build -t todoist-mcp-server-extended .",
-    "docker:build:fast": "npm run build && docker build -t todoist-mcp-server-extended ."
+    "docker:build": "npm run build:check && npm test && npm run build && docker build -t todoist-mcp-server-http .",
+    "docker:build:fast": "npm run build && docker build -t todoist-mcp-server-http ."
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Chrusic/todoist-mcp-server-extended.git"
+    "url": "git+https://github.com/heathweaver/todoist-mcp-server-http.git"
   },
   "keywords": [
     "mcp",
@@ -36,12 +36,12 @@
     "modelcontextprotocol",
     "label-management"
   ],
-  "author": "Chrusic",
+  "author": "Heath Weaver (inspired by @Chrusic/todoist-mcp-server-extended)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/Chrusic/todoist-mcp-server-extended/issues"
+    "url": "https://github.com/heathweaver/todoist-mcp-server-http/issues"
   },
-  "homepage": "https://github.com/Chrusic/todoist-mcp-server-extended#readme",
+  "homepage": "https://github.com/heathweaver/todoist-mcp-server-http#readme",
   "dependencies": {
     "@doist/todoist-api-typescript": "^3.0.3",
     "@modelcontextprotocol/sdk": "^1.0.4",

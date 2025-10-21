@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  todoist-mcp-server:
+  todoist-mcp-server-http:
     build: .
-    container_name: todoist-mcp-server
+    container_name: todoist-mcp-server-http
     ports:
       - "8766:8766"
     environment:

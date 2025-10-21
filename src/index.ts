@@ -29,7 +29,7 @@ class TodoistMCPServer {
 
     this.server = new Server(
       {
-        name: 'todoist-mcp-server-extended',
+        name: 'todoist-mcp-server-http',
         version: '0.2.5',
       },
       {
@@ -1266,7 +1266,7 @@ class TodoistMCPServer {
 
     // Health check endpoint (public)
     this.app.get('/health', (req, res) => {
-      res.json({ status: 'ok', server: 'todoist-mcp-server-extended' });
+      res.json({ status: 'ok', server: 'todoist-mcp-server-http' });
     });
 
     // MCP Streamable HTTP endpoint (handles GET, POST, DELETE)
@@ -1345,7 +1345,7 @@ class TodoistMCPServer {
     const host = process.env.HOST || '0.0.0.0';
 
     this.app.listen(port, host, () => {
-      console.log(`Todoist MCP Server Extended running on http://${host}:${port}`);
+      console.log(`Todoist MCP Server HTTP running on http://${host}:${port}`);
       console.log(`Health check: http://${host}:${port}/health`);
       console.log(`MCP endpoint: http://${host}:${port}/mcp`);
     });

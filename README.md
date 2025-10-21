@@ -1,4 +1,4 @@
-# Todoist MCP Server Extended
+# Todoist MCP Server HTTP
 
 A complete rewrite of the original [@Chrusic/todoist-mcp-server-extended](https://github.com/Chrusic/todoist-mcp-server-extended) project, featuring:
 
@@ -164,16 +164,20 @@ npm run test:watch         # Watch mode
 
 Test files are in `tests/` directory using `.js` extension to avoid TypeScript compilation issues.
 
+## 🙏 Credits & Inspiration
+
+This project is a complete architectural rewrite inspired by the original [@Chrusic/todoist-mcp-server-extended](https://github.com/Chrusic/todoist-mcp-server-extended).
+
+**Key differences from the original:**
+- **Transport**: HTTP-based (`StreamableHTTPServerTransport`) vs stdio-based (`StdioServerTransport`)
+- **Authentication**: GitHub OAuth integration vs none
+- **Deployment**: Docker-first with Cloudflare tunnels vs local npm install
+- **Architecture**: Session management, batch operations, enhanced error handling
+- **Features**: Comments support, smart task search, production-ready logging
+
+**Original Project**: [@Chrusic/todoist-mcp-server-extended](https://github.com/Chrusic/todoist-mcp-server-extended) - A stdio-based MCP server for Todoist integration.
+
 ## 📚 Original Project
-
-This project is a complete rewrite of [@Chrusic/todoist-mcp-server-extended](https://github.com/Chrusic/todoist-mcp-server-extended).
-
-**Key differences:**
-- HTTP-based instead of stdio-based
-- Added authentication and session management
-- Docker-first deployment approach
-- Enhanced error handling and batch operations
-- Comments support
 
 ## 🤝 Contributing
 
@@ -191,6 +195,6 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🆘 Support
 
-- **Issues**: [GitHub Issues](https://github.com/heathweaver/todoist-mcp-server-extended/issues)
+- **Issues**: [GitHub Issues](https://github.com/heathweaver/todoist-mcp-server-http/issues)
 - **Health Check**: https://todoist.ssc.one/health
 - **MCP Endpoint**: https://todoist.ssc.one/mcp
