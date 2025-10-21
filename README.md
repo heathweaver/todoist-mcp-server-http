@@ -1,135 +1,196 @@
 # Todoist MCP Server Extended
 
-[![smithery badge](https://smithery.ai/badge/@Chrusic/todoist-mcp-server-extended)](https://smithery.ai/server/@Chrusic/todoist-mcp-server-extended)
+A complete rewrite of the original [@Chrusic/todoist-mcp-server-extended](https://github.com/Chrusic/todoist-mcp-server-extended) project, featuring:
 
-An MCP (Model Context Protocol) server implementation that integrates Claude - or any MCP compatible LLM if you're crafty - with Todoist, enabling natural language task management via MCP tools. The tools in this server allows Claude to interact with your Todoist tasks, projects, sections, and labels using everyday language, while also optimized for LLM workflow efficiency.
+- **HTTP-based MCP server** using `StreamableHTTPServerTransport`
+- **GitHub OAuth authentication** for secure access
+- **Docker deployment** with Cloudflare tunnel support
+- **Enhanced Todoist API integration** with comments support
+- **Production-ready architecture** following proven MCP patterns
 
-<a href="https://glama.ai/mcp/servers/xzuab11d38"><img width="380" height="200" src="https://glama.ai/mcp/servers/xzuab11d38/badge" alt="Todoist Server MCP server" /></a>
+## 🚀 Live Deployment
 
-## Features Overview
+This server is deployed and accessible at:
+- **Health Check**: https://todoist.ssc.one/health
+- **MCP Endpoint**: https://todoist.ssc.one/mcp
 
-* **Task Management**: Create, update, complete, and delete tasks using everyday language
-* **Label Management**: Create, update, and manage personal labels and task labels
-* **Project Management**: Create, update, and manage Todoist projects
-* **Section Organization**: Create and manage sections within projects
-* **Smart Search**: Find tasks and labels using partial name matches
-* **Flexible Filtering**: Filter tasks by project, section, due date, priority, and labels
-* **Rich Task Details**: Support for descriptions, due dates, priority levels, and project/section assignment
-* **Batch Operations**: Tools have built in batch operation support and custom parameters for efficient usage with LLM workflows
+## 🏗️ Architecture Changes
 
-For a complete list of available tools as well as their usage, see [tools.md](doc/tools.md).
+This is a **complete architectural rewrite** from the original stdio-based MCP server:
 
-## Quick Installation Guide
+### Original vs. This Version
 
-**Assuming you already have npm installed.**
+| Feature | Original | This Version |
+|---------|----------|-------------|
+| Transport | `StdioServerTransport` | `StreamableHTTPServerTransport` |
+| Authentication | None | GitHub OAuth |
+| Deployment | Local npm install | Docker + Cloudflare tunnel |
+| Session Management | None | UUID-based sessions |
+| Comments Support | ❌ | ✅ |
+| Batch Operations | Basic | Enhanced |
+| Error Handling | Basic | Comprehensive |
 
-A more comprehensive installation guide can be found in the [How-to Guide.](doc/Howto%20-%20Setting%20up%20Claude%20Todoist%20MCP%20on%20Windows.md)
+## 🛠️ Features
 
-### Installing via Smithery
+- **Task Management**: Create, update, complete, and delete tasks
+- **Project Management**: Create and manage Todoist projects
+- **Comments Support**: Add and retrieve task comments
+- **Batch Operations**: Handle multiple tasks/projects at once
+- **Smart Search**: Find tasks by name when ID not available
+- **GitHub Authentication**: Secure access via OAuth
+- **Docker Ready**: Containerized deployment
+- **Health Monitoring**: Built-in health checks
 
-To install Todoist MCP Server Extended for Claude Desktop via [Smithery](https://smithery.ai/server/@Chrusic/todoist-mcp-server-extended):
+## 📋 Available Tools
 
-1. Run following command in cmd\pwsh:
+- `todoist_create_task` - Create single or batch tasks
+- `todoist_get_tasks` - Retrieve tasks with filtering
+- `todoist_update_task` - Update single or batch tasks
+- `todoist_delete_task` - Delete single or batch tasks
+- `todoist_complete_task` - Mark tasks as complete
+- `todoist_get_projects` - Retrieve projects
+- `todoist_create_project` - Create single or batch projects
+- `todoist_get_task_comments` - Get task comments
+- `todoist_create_task_comment` - Add task comments
 
-```bash
-    npx -y @smithery/cli install @Chrusic/todoist-mcp-server-extended --client claude
-```
+## 🐳 Docker Deployment
 
-*Also compatible with cline or windsurf, by changing last parameter to  `--client cline` or `--client windsurf`*
+### Prerequisites
 
-### Installing via npm
+1. **Todoist API Token** - Get from [Todoist Settings → Integrations](https://todoist.com/prefs/integrations)
+2. **GitHub OAuth App** - Set up in GitHub Developer Settings
+3. **Cloudflare Account** - For tunnel setup
 
-1. Run following command in cmd\pwsh:
+### Environment Variables
 
-``` bash
-    npm install -g @chrusic/todoist-mcp-server-extended
-```
-
-## Setup
-
-### Grab a Todoist API Token
-
-1. Log in to your [Todoist account](https://www.todoist.com/)
-2. Navigate to `Settings → Integrations`
-3. Find your API token under `Developer`
-4. Press `Copy API Token`
-
-For more information about the Todoist API, visit the [official Todoist API documentation](https://developer.todoist.com/guides/#developing-with-todoist).
-
-### Add MCP Server and API Token Claude Desktop Client
-
-1. In your  `claude_desktop_config.json` file, paste the following json snippet between: `"mcpServers":{ }:`
-
-    ``` json
-    "todoist": {
-      "command": "npx",
-      "args": ["-y", "@chrusic/todoist-mcp-server-extended"],
-      "env": {
-          "TODOIST_API_TOKEN": "PASTE-YOUR-API-TOKEN-HERE"
-      }
-    }
-    ```
-
-2. When all put together, it should look something like this:
-
-    ``` json
-    {
-    "mcpServers": {
-        "todoist": {
-        "command": "npx",
-        "args": ["-y", "@chrusic/todoist-mcp-server-extended"],
-        "env": {
-            "TODOIST_API_TOKEN": "PASTE-YOUR-API-TOKEN-HERE"
-        }
-        }
-    }
-    }
-    ```
-
-3. Claude Desktop client will then start the MCP server and load the tools on the next client (re)start.
-
-## Docker Usage
-
-If you're running this server in Docker (e.g., on Synology), make sure to pass the API token as an environment variable:
+Create a `.env` file:
 
 ```bash
-docker run -e TODOIST_API_TOKEN=your_api_token_here your-image-name
+TODOIST_API_TOKEN=your_todoist_api_token
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+GITHUB_CALLBACK_URL=http://localhost:8766/auth/github/callback
 ```
 
-Or using docker-compose:
+### Docker Compose
+
+```bash
+# Build and start
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+```
+
+### Manual Docker Commands
+
+```bash
+# Build image
+docker build -t todoist-mcp-server-extended .
+
+# Run container
+docker run -d --name todoist-mcp-server \
+  -p 8766:8766 \
+  --env-file .env \
+  todoist-mcp-server-extended
+
+# Set up Cloudflare tunnel (inside container)
+docker exec -it todoist-mcp-server /bin/sh
+cloudflared tunnel login
+cloudflared tunnel create todoist-mcp
+cloudflared tunnel route dns todoist-mcp your-domain.com
+```
+
+## 🌐 Cloudflare Tunnel Setup
+
+1. **Install cloudflared** in the Docker container
+2. **Create tunnel**: `cloudflared tunnel create todoist-mcp`
+3. **Add DNS record**: `cloudflared tunnel route dns todoist-mcp your-domain.com`
+4. **Configure tunnel** with `config.yml`:
 
 ```yaml
-version: '3.8'
-services:
-  todoist-mcp:
-    image: your-image-name
-    environment:
-      - TODOIST_API_TOKEN=your_api_token_here
+tunnel: your-tunnel-id
+credentials-file: /root/.cloudflared/your-tunnel-id.json
+
+ingress:
+  - hostname: your-domain.com
+    service: http://localhost:8766
+  - service: http_status:404
 ```
 
-**Important**: Never put your API token in the Dockerfile or commit it to git. Always use environment variables or secrets management.
+## 🔧 Development
 
-## Example Usage
+### Prerequisites
 
-Some simple suggestions on what to ask Claude. Note that sometimes you have to be *very* direct to get claude to use the tools:
+- Node.js 22+
+- TypeScript 5.7+
+- Docker (optional)
 
-* "Using the MCP tool: todoist_get_tasks, list all my tasks for the day."
-* "Create task 'Review PR' in project 'Work' section 'To Do'"
-* "Add label 'Important' to task 'Review PR'"
-* "Show all tasks with label 'Important' in project 'Work'"
-* "Move task 'Documentation' to section 'In Progress'"
-* "Mark the documentation task as complete"
-* "Give me some suggestions for listed tasks I can do today as I'm going shopping in town."
-* "Break task X down in to smaller subtasks and add due dates, x, y, z."
+### Setup
 
-## Contributing
+```bash
+# Install dependencies
+npm install
 
-Contributions are welcome! Feel free to submit a Pull Request.
+# Build TypeScript
+npm run build
 
-## License
+# Run tests
+npm test
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+# Type check
+npm run build:check
+```
 
-## Issues and Support
+### Scripts
 
-If you encounter any issues or need support, please file an issue on the [GitHub repository](https://github.com/Chrusic/todoist-mcp-server-extended/issues).
+- `npm run build` - Compile TypeScript
+- `npm run build:check` - Type check without emit
+- `npm test` - Run test suite
+- `npm run docker:build` - Build Docker image with tests
+- `npm run docker:build:fast` - Quick Docker build
+
+## 🧪 Testing
+
+Uses Node.js built-in test runner with JavaScript test files:
+
+```bash
+npm test                    # Run all tests
+npm run test:watch         # Watch mode
+```
+
+Test files are in `tests/` directory using `.js` extension to avoid TypeScript compilation issues.
+
+## 📚 Original Project
+
+This project is a complete rewrite of [@Chrusic/todoist-mcp-server-extended](https://github.com/Chrusic/todoist-mcp-server-extended).
+
+**Key differences:**
+- HTTP-based instead of stdio-based
+- Added authentication and session management
+- Docker-first deployment approach
+- Enhanced error handling and batch operations
+- Comments support
+
+## 🤝 Contributing
+
+This project follows a different architecture from the original. If you want to contribute:
+
+1. Fork this repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Submit a pull request
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## 🆘 Support
+
+- **Issues**: [GitHub Issues](https://github.com/heathweaver/todoist-mcp-server-extended/issues)
+- **Health Check**: https://todoist.ssc.one/health
+- **MCP Endpoint**: https://todoist.ssc.one/mcp

@@ -1,5 +1,5 @@
 {
-  "name": "@chrusic/todoist-mcp-server-extended",
+  "name": "@heathweaver/todoist-mcp-server-extended",
   "version": "0.2.5",
   "description": "Todoist MCP Server Extended, made to be efficient to use for an LLM's like Claude.",
   "main": "dist/index.js",
@@ -13,7 +13,14 @@
   ],
   "scripts": {
     "build": "tsc && shx chmod +x dist/*.js",
-    "watch": "tsc --watch"
+    "build:check": "tsc --noEmit",
+    "lint": "echo 'No linter configured'",
+    "test": "node --test tests/**/*.test.js",
+    "test:watch": "node --test --watch tests/**/*.test.js",
+    "prebuild": "npm run build:check",
+    "prepack": "npm run build:check && npm test",
+    "docker:build": "npm run build:check && npm test && npm run build && docker build -t todoist-mcp-server-extended .",
+    "docker:build:fast": "npm run build && docker build -t todoist-mcp-server-extended ."
   },
   "repository": {
     "type": "git",
@@ -37,10 +44,14 @@
   "homepage": "https://github.com/Chrusic/todoist-mcp-server-extended#readme",
   "dependencies": {
     "@doist/todoist-api-typescript": "^3.0.3",
-    "@modelcontextprotocol/sdk": "^0.5.0"
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
     "shx": "^0.3.4",
     "typescript": "^5.7.2"
   },

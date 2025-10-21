@@ -32,6 +32,11 @@ COPY --from=builder /app/package-lock.json .
 # Install production dependencies
 RUN npm ci --omit=dev
 
+# Install cloudflared
+RUN wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared && \
+    chmod +x cloudflared && \
+    mv cloudflared /usr/local/bin/
+
 # Environment variable for the Todoist API token should be provided at runtime
 # Example: docker run -e TODOIST_API_TOKEN=your_token_here your-image
 
@@ -39,8 +44,8 @@ RUN npm ci --omit=dev
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "console.log('OK')" || exit 1
 
-# Expose the port that the server listens to, if applicable
-# EXPOSE <port-number>
+# Expose the port that the server listens to
+EXPOSE 8766
 
 # Command to run the server
 ENTRYPOINT ["node", "dist/index.js"]
