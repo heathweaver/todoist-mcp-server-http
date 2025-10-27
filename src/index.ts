@@ -364,6 +364,80 @@ class TodoistMCPServer {
                 { required: ["task_name", "content"] }
               ]
             }
+          },
+          {
+            name: "todoist_create_section",
+            description: "Create one or more sections in Todoist projects",
+            inputSchema: {
+              type: "object",
+              properties: {
+                sections: {
+                  type: "array",
+                  description: "Array of sections to create (for batch operations)",
+                  items: {
+                    type: "object",
+                    properties: {
+                      project_id: { type: "string", description: "ID of the project to create the section in (preferred)" },
+                      project_name: { type: "string", description: "Name of the project to create the section in (if ID not provided)" },
+                      name: { type: "string", description: "Name of the section (required)" },
+                      order: { type: "number", description: "Order of the section within the project (optional)" }
+                    },
+                    required: ["name"],
+                    anyOf: [
+                      { required: ["project_id"] },
+                      { required: ["project_name"] }
+                    ]
+                  }
+                },
+                // For backward compatibility - single section parameters
+                project_id: { type: "string", description: "ID of the project to create the section in (preferred)" },
+                project_name: { type: "string", description: "Name of the project to create the section in (if ID not provided)" },
+                name: { type: "string", description: "Name of the section (required)" },
+                order: { type: "number", description: "Order of the section within the project (optional)" }
+              },
+              anyOf: [
+                { required: ["sections"] },
+                { required: ["project_id", "name"] },
+                { required: ["project_name", "name"] }
+              ]
+            }
+          },
+          {
+            name: "todoist_rename_section",
+            description: "Rename one or more sections in Todoist",
+            inputSchema: {
+              type: "object",
+              properties: {
+                sections: {
+                  type: "array",
+                  description: "Array of sections to rename (for batch operations)",
+                  items: {
+                    type: "object",
+                    properties: {
+                      section_id: { type: "string", description: "ID of the section to rename (preferred)" },
+                      section_name: { type: "string", description: "Current name of the section to search for and rename (if ID not provided)" },
+                      project_id: { type: "string", description: "ID of the project (required when using section_name)" },
+                      new_name: { type: "string", description: "New name for the section (required)" }
+                    },
+                    required: ["new_name"],
+                    anyOf: [
+                      { required: ["section_id"] },
+                      { required: ["section_name", "project_id"] }
+                    ]
+                  }
+                },
+                // For backward compatibility - single section parameters
+                section_id: { type: "string", description: "ID of the section to rename (preferred)" },
+                section_name: { type: "string", description: "Current name of the section to search for and rename (if ID not provided)" },
+                project_id: { type: "string", description: "ID of the project (required when using section_name)" },
+                new_name: { type: "string", description: "New name for the section (required)" }
+              },
+              anyOf: [
+                { required: ["sections"] },
+                { required: ["section_id", "new_name"] },
+                { required: ["section_name", "project_id", "new_name"] }
+              ]
+            }
           }
         ],
       };
@@ -1230,6 +1304,251 @@ class TodoistMCPServer {
                       content: comment.content,
                       posted_at: comment.postedAt
                     }
+                  }, null, 2)
+                }],
+                isError: false
+              };
+            }
+          }
+
+          case 'todoist_create_section': {
+            const args = request.params.arguments as any;
+            
+            // Handle batch section creation
+            if (args.sections && args.sections.length > 0) {
+              const allProjects = await this.todoistClient.getProjects();
+              
+              const results = await Promise.all(args.sections.map(async (sectionData: any) => {
+                try {
+                  let projectId = sectionData.project_id;
+                  
+                  if (!projectId && sectionData.project_name) {
+                    const matchingProject = allProjects.find(project => 
+                      project.name.toLowerCase().includes(sectionData.project_name.toLowerCase())
+                    );
+                    if (!matchingProject) {
+                      return {
+                        success: false,
+                        error: `Project not found: ${sectionData.project_name}`,
+                        project_name: sectionData.project_name
+                      };
+                    }
+                    projectId = matchingProject.id;
+                  }
+                  
+                  if (!projectId) {
+                    return {
+                      success: false,
+                      error: "Either project_id or project_name must be provided",
+                      sectionData
+                    };
+                  }
+
+                  const apiParams: any = {
+                    name: sectionData.name,
+                    projectId: projectId
+                  };
+                  
+                  if (sectionData.order !== undefined) {
+                    apiParams.order = sectionData.order;
+                  }
+
+                  const section = await this.todoistClient.addSection(apiParams);
+                  return {
+                    success: true,
+                    section_id: section.id,
+                    name: section.name,
+                    project_id: section.projectId
+                  };
+                } catch (error) {
+                  return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                    sectionData
+                  };
+                }
+              }));
+
+              const successCount = results.filter(r => r.success).length;
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: successCount === args.sections.length,
+                    summary: {
+                      total: args.sections.length,
+                      succeeded: successCount,
+                      failed: args.sections.length - successCount
+                    },
+                    results
+                  }, null, 2)
+                }],
+                isError: successCount < args.sections.length
+              };
+            }
+            // Handle single section creation (backward compatibility)
+            else {
+              let projectId = args.project_id;
+              
+              if (!projectId && args.project_name) {
+                const projects = await this.todoistClient.getProjects();
+                const matchingProject = projects.find(project => 
+                  project.name.toLowerCase().includes(args.project_name.toLowerCase())
+                );
+                if (!matchingProject) {
+                  return {
+                    content: [{
+                      type: 'text',
+                      text: JSON.stringify({
+                        success: false,
+                        error: `Project not found: ${args.project_name}`
+                      }, null, 2)
+                    }],
+                    isError: true
+                  };
+                }
+                projectId = matchingProject.id;
+              }
+              
+              if (!projectId) {
+                throw new Error("Either project_id or project_name must be provided");
+              }
+
+              const apiParams: any = {
+                name: args.name,
+                projectId: projectId
+              };
+              
+              if (args.order !== undefined) {
+                apiParams.order = args.order;
+              }
+
+              const section = await this.todoistClient.addSection(apiParams);
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    section_id: section.id,
+                    name: section.name,
+                    project_id: section.projectId
+                  }, null, 2)
+                }],
+                isError: false
+              };
+            }
+          }
+
+          case 'todoist_rename_section': {
+            const args = request.params.arguments as any;
+            
+            // Handle batch section renaming
+            if (args.sections && args.sections.length > 0) {
+              const results = await Promise.all(args.sections.map(async (sectionData: any) => {
+                try {
+                  let sectionId = sectionData.section_id;
+                  
+                  if (!sectionId && sectionData.section_name && sectionData.project_id) {
+                    const sections = await this.todoistClient.getSections(sectionData.project_id);
+                    const matchingSection = sections.find(section => 
+                      section.name.toLowerCase().includes(sectionData.section_name.toLowerCase())
+                    );
+                    if (!matchingSection) {
+                      return {
+                        success: false,
+                        error: `Section not found: ${sectionData.section_name}`,
+                        section_name: sectionData.section_name
+                      };
+                    }
+                    sectionId = matchingSection.id;
+                  }
+                  
+                  if (!sectionId) {
+                    return {
+                      success: false,
+                      error: "Either section_id or (section_name and project_id) must be provided",
+                      sectionData
+                    };
+                  }
+
+                  const section = await this.todoistClient.updateSection(sectionId, {
+                    name: sectionData.new_name
+                  });
+                  
+                  return {
+                    success: true,
+                    section_id: section.id,
+                    old_name: sectionData.section_name || "N/A",
+                    new_name: section.name,
+                    project_id: section.projectId
+                  };
+                } catch (error) {
+                  return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                    sectionData
+                  };
+                }
+              }));
+
+              const successCount = results.filter(r => r.success).length;
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: successCount === args.sections.length,
+                    summary: {
+                      total: args.sections.length,
+                      succeeded: successCount,
+                      failed: args.sections.length - successCount
+                    },
+                    results
+                  }, null, 2)
+                }],
+                isError: successCount < args.sections.length
+              };
+            }
+            // Handle single section renaming (backward compatibility)
+            else {
+              let sectionId = args.section_id;
+              
+              if (!sectionId && args.section_name && args.project_id) {
+                const sections = await this.todoistClient.getSections(args.project_id);
+                const matchingSection = sections.find(section => 
+                  section.name.toLowerCase().includes(args.section_name.toLowerCase())
+                );
+                if (!matchingSection) {
+                  return {
+                    content: [{
+                      type: 'text',
+                      text: JSON.stringify({
+                        success: false,
+                        error: `Section not found: ${args.section_name}`
+                      }, null, 2)
+                    }],
+                    isError: true
+                  };
+                }
+                sectionId = matchingSection.id;
+              }
+              
+              if (!sectionId) {
+                throw new Error("Either section_id or (section_name and project_id) must be provided");
+              }
+
+              const section = await this.todoistClient.updateSection(sectionId, {
+                name: args.new_name
+              });
+              
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    section_id: section.id,
+                    old_name: args.section_name || "N/A",
+                    new_name: section.name,
+                    project_id: section.projectId
                   }, null, 2)
                 }],
                 isError: false

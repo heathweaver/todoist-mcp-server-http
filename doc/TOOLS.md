@@ -293,30 +293,112 @@ Get sections from one or more projects in Todoist.
 }
 ```
 
-### todoist_create_project_section
+### todoist_create_section
 
 Create one or more sections in Todoist projects.
 
 #### Single Section Format
 
-- `project_id` (string, required): ID of the project
+- `project_id` (string): ID of the project to create the section in (preferred)
+- `project_name` (string): Name of the project to create the section in (if ID not provided)
 - `name` (string, required): Name of the section
-- `order` (number): Order of the section
+- `order` (number): Order of the section within the project (optional)
 
 #### Batch Format
 
 - `sections` (array): Array of section objects with the following properties:
-  - `project_id` (string): ID of the project to create the section in
+  - `project_id` (string): ID of the project to create the section in (preferred)
   - `project_name` (string): Name of the project to create the section in (if ID not provided)
   - `name` (string, required): Name of the section
-  - `order` (number): Order of the section
+  - `order` (number): Order of the section within the project (optional)
 
 #### Example
 
+Single section:
 ```json
 {
   "project_id": "2203306141",
   "name": "Planning"
+}
+```
+
+Or using project name:
+```json
+{
+  "project_name": "Work Projects",
+  "name": "Planning",
+  "order": 1
+}
+```
+
+Batch creation:
+```json
+{
+  "sections": [
+    {
+      "project_id": "2203306141",
+      "name": "Planning"
+    },
+    {
+      "project_name": "Work Projects",
+      "name": "In Progress"
+    }
+  ]
+}
+```
+
+### todoist_rename_section
+
+Rename one or more sections in Todoist.
+
+#### Single Section Format
+
+- `section_id` (string): ID of the section to rename (preferred)
+- `section_name` (string): Current name of the section to search for and rename (if ID not provided)
+- `project_id` (string): ID of the project (required when using section_name)
+- `new_name` (string, required): New name for the section
+
+#### Batch Format
+
+- `sections` (array): Array of section objects with the following properties:
+  - `section_id` (string): ID of the section to rename (preferred)
+  - `section_name` (string): Current name of the section to search for and rename (if ID not provided)
+  - `project_id` (string): ID of the project (required when using section_name)
+  - `new_name` (string, required): New name for the section
+
+#### Example
+
+Using section ID:
+```json
+{
+  "section_id": "7025",
+  "new_name": "Completed Planning"
+}
+```
+
+Using section name:
+```json
+{
+  "section_name": "Planning",
+  "project_id": "2203306141",
+  "new_name": "Completed Planning"
+}
+```
+
+Batch renaming:
+```json
+{
+  "sections": [
+    {
+      "section_id": "7025",
+      "new_name": "Active Tasks"
+    },
+    {
+      "section_name": "Planning",
+      "project_id": "2203306141",
+      "new_name": "Future Tasks"
+    }
+  ]
 }
 ```
 
