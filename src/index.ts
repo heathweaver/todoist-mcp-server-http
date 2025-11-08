@@ -8,15 +8,327 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import cors from 'cors';
 import { TodoistApi } from '@doist/todoist-api-typescript';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
+
+const SCOPES = ['todoist.read', 'todoist.write'] as const;
+const DEFAULT_SCOPE = SCOPES.join(' ');
+const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
+const ACCESS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+type TokenInfo = {
+  user: string;
+  createdAt: number;
+  scope: string;
+  expiresAt: number | null;
+};
+
+type AuthorizationCodeRecord = {
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  codeChallengeMethod: 'S256';
+  scope: string;
+  user: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+type PendingAuthState =
+  | { type: 'manual'; createdAt: number; scope: string }
+  | {
+      type: 'oauth';
+      clientId: string;
+      redirectUri: string;
+      codeChallenge: string;
+      codeChallengeMethod: 'S256';
+      scope: string;
+      originalState: string;
+      createdAt: number;
+    };
+
+type RegisteredClient = {
+  clientId: string;
+  clientName?: string;
+  redirectUris: string[];
+  scope: string;
+  tokenEndpointAuthMethod: 'none' | 'client_secret_basic' | 'client_secret_post';
+  clientSecret?: string;
+  clientIdIssuedAt: number;
+  clientSecretExpiresAt: number | null;
+  registrationAccessToken: string;
+};
+
+function base64UrlEncode(buffer: Buffer): string {
+  return buffer
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+function sha256Base64Url(value: string): string {
+  return base64UrlEncode(createHash('sha256').update(value).digest());
+}
+
+function sanitizeScope(scope?: string): string {
+  if (!scope || !scope.trim()) {
+    return DEFAULT_SCOPE;
+  }
+  const scopes = scope
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter(s => (SCOPES as readonly string[]).includes(s));
+  return scopes.length ? scopes.join(' ') : DEFAULT_SCOPE;
+}
+
+function scopesAreValid(scope: string): boolean {
+  return scope
+    .split(/\s+/)
+    .filter(Boolean)
+    .every(s => (SCOPES as readonly string[]).includes(s));
+}
+
+const ULID_PATTERN = '^[0-9A-HJKMNP-TV-Z]{26}$';
+const ULID_REGEX = new RegExp(ULID_PATTERN);
+const LEGACY_NUMERIC_ID_REGEX = /^\d+$/;
+
+type ToolResponse = {
+  content: Array<{ type: 'text'; text: string }>;
+  isError: boolean;
+};
+
+function ensureUlid(value: unknown, field: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${field} must be a string`);
+  }
+  // Accept both ULIDs and legacy numeric IDs
+  if (!ULID_REGEX.test(value) && !LEGACY_NUMERIC_ID_REGEX.test(value)) {
+    throw new Error(`${field} must be a ULID (26-character alphanumeric) or legacy numeric ID`);
+  }
+  return value;
+}
+
+function ensureNullableUlid(value: unknown, field: string): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  return ensureUlid(value, field);
+}
+
+function ensureOptionalUlid(value: unknown, field: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return ensureUlid(value, field);
+}
+
+function ensureNonEmptyArray<T>(value: unknown, field: string): T[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${field} must be a non-empty array`);
+  }
+  return value as T[];
+}
+
+function ensureObject<T extends Record<string, unknown>>(value: unknown, field: string): T {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  return value as T;
+}
+
+function ensureString(value: unknown, field: string, { allowEmpty = false }: { allowEmpty?: boolean } = {}): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${field} must be a string`);
+  }
+  if (!allowEmpty && value.trim().length === 0) {
+    throw new Error(`${field} must not be empty`);
+  }
+    return value;
+  }
+
+function ensureOptionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return ensureString(value, field);
+}
+
+function ensureNullableString(value: unknown, field: string, { allowEmpty = false }: { allowEmpty?: boolean } = {}): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  return ensureString(value, field, { allowEmpty });
+}
+
+function ensureOptionalNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    throw new Error(`${field} must be a number`);
+  }
+  return value;
+}
+
+function ensureOptionalIntegerInRange(value: unknown, field: string, min: number, max: number): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${field} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function ensureOptionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'boolean') {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
+}
+
+function ensureStringArray(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) {
+    throw new Error(`${field} must be an array of strings`);
+  }
+  return value as string[];
+}
+
+function ensureOptionalEnum<T extends string>(value: unknown, field: string, allowed: readonly T[]): T | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new Error(`${field} must be one of: ${allowed.join(', ')}`);
+  }
+  return value as T;
+}
+
+function ensureUlidArray(value: unknown, field: string, { allowEmpty = false }: { allowEmpty?: boolean } = {}): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be an array`);
+  }
+  if (!allowEmpty && value.length === 0) {
+    throw new Error(`${field} must not be empty`);
+  }
+  return value.map((item, index) => ensureUlid(item, `${field}[${index}]`));
+}
+
+function buildToolResponse(payload: unknown, isError: boolean): ToolResponse {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
+      },
+    ],
+    isError,
+  };
+}
+
+function buildBatchResponse<T extends { success: boolean }>(results: T[], total: number): ToolResponse {
+  const successCount = results.filter(result => result.success).length;
+  return buildToolResponse(
+    {
+      success: successCount === total,
+      summary: {
+        total,
+        succeeded: successCount,
+        failed: total - successCount,
+      },
+      results,
+    },
+    successCount !== total
+  );
+}
+
+function ulidSchema(description: string) {
+  return {
+    type: "string",
+    description: `${description} Accepts both ULID (26-char alphanumeric) and legacy numeric ID formats.`,
+  };
+}
+
+function nullableUlidSchema(description: string) {
+  return {
+    anyOf: [
+      { type: "string" },
+      { type: "null" },
+    ],
+    description: `${description} Accepts both ULID (26-char alphanumeric) and legacy numeric ID formats, or null.`,
+  };
+}
+
+function getQueryParam(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
 
 // Store transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {};
+// Store issued API tokens by token string (in-memory)
+const issuedTokens = new Map<string, TokenInfo>();
+const authorizationCodes = new Map<string, AuthorizationCodeRecord>();
+const pendingAuthStates = new Map<string, PendingAuthState>();
+const registeredClients = new Map<string, RegisteredClient>();
+// Allow pre-shared tokens via env (comma-separated)
+const allowedTokens = new Set(
+  (process.env.MCP_ALLOWED_TOKENS || '')
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean)
+);
+
+function getTokenInfo(token: string): TokenInfo | null {
+  const stored = issuedTokens.get(token);
+  if (stored) {
+    if (stored.expiresAt && Date.now() > stored.expiresAt) {
+      issuedTokens.delete(token);
+      return null;
+    }
+    return stored;
+  }
+
+  if (allowedTokens.has(token)) {
+    return {
+      user: 'pre-shared-token',
+      createdAt: 0,
+      scope: DEFAULT_SCOPE,
+      expiresAt: null,
+    };
+  }
+
+  return null;
+}
+
+function isTokenAuthorized(token: string): boolean {
+  return getTokenInfo(token) !== null;
+}
 
 class TodoistMCPServer {
   private server: Server;
   private app: express.Application;
   private todoistClient: TodoistApi;
+  private todoistAuthToken: string;
+  private todoistRestBaseUrl: string;
+  private idMappingCache: Map<string, string>;
 
   constructor() {
     // Initialize Todoist API client
@@ -26,6 +338,9 @@ class TodoistMCPServer {
       process.exit(1);
     }
     this.todoistClient = new TodoistApi(TODOIST_API_TOKEN);
+    this.todoistAuthToken = TODOIST_API_TOKEN;
+    this.todoistRestBaseUrl = (process.env.TODOIST_API_BASE_URL || 'https://api.todoist.com/api/v1').replace(/\/$/, '');
+    this.idMappingCache = new Map();
 
     this.server = new Server(
       {
@@ -44,1552 +359,1719 @@ class TodoistMCPServer {
     this.setupExpress();
   }
 
-  private setupHandlers() {
-    // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return {
-        tools: [
-          {
-            name: "todoist_create_task",
-            description: "Create one or more tasks in Todoist with full parameter support",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tasks: {
-                  type: "array",
-                  description: "Array of tasks to create (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      content: { type: "string", description: "The content/title of the task (required)" },
-                      description: { type: "string", description: "Detailed description of the task (optional)" },
-                      project_id: { type: "string", description: "ID of the project to add the task to (optional)" },
-                      section_id: { type: "string", description: "ID of the section to add the task to (optional)" },
-                      parent_id: { type: "string", description: "ID of the parent task for subtasks (optional)" },
-                      order: { type: "number", description: "Position in the project or parent task (optional)" },
-                      labels: { type: "array", items: { type: "string" }, description: "Array of label names to apply to the task (optional)" },
-                      priority: { type: "number", description: "Task priority from 1 (normal) to 4 (urgent) (optional)", enum: [1, 2, 3, 4] },
-                      due_string: { type: "string", description: "Natural language due date like 'tomorrow', 'next Monday' (optional)" },
-                      due_date: { type: "string", description: "Due date in YYYY-MM-DD format (optional)" },
-                      due_datetime: { type: "string", description: "Due date and time in RFC3339 format (optional)" },
-                      due_lang: { type: "string", description: "2-letter language code for due date parsing (optional)" },
-                      assignee_id: { type: "string", description: "User ID to assign the task to (optional)" },
-                      duration: { type: "number", description: "The duration amount of the task (optional)" },
-                      duration_unit: { type: "string", description: "The duration unit ('minute' or 'day') (optional)", enum: ["minute", "day"] },
-                      deadline_date: { type: "string", description: "Deadline date in YYYY-MM-DD format (optional)" },
-                      deadline_lang: { type: "string", description: "2-letter language code for deadline parsing (optional)" }
-                    },
-                    required: ["content"]
-                  }
-                },
-                // For backward compatibility - single task parameters
-                content: { type: "string", description: "The content/title of the task" },
-                description: { type: "string", description: "Detailed description of the task" },
-                project_id: { type: "string", description: "ID of the project to add the task to" },
-                section_id: { type: "string", description: "ID of the section to add the task to" },
-                parent_id: { type: "string", description: "ID of the parent task for subtasks" },
-                order: { type: "number", description: "Position in the project or parent task" },
-                labels: { type: "array", items: { type: "string" }, description: "Array of label names to apply to the task" },
-                priority: { type: "number", description: "Task priority from 1 (normal) to 4 (urgent)", enum: [1, 2, 3, 4] },
-                due_string: { type: "string", description: "Natural language due date like 'tomorrow', 'next Monday'" },
-                due_date: { type: "string", description: "Due date in YYYY-MM-DD format" },
-                due_datetime: { type: "string", description: "Due date and time in RFC3339 format" },
-                due_lang: { type: "string", description: "2-letter language code for due date parsing" },
-                assignee_id: { type: "string", description: "User ID to assign the task to" },
-                duration: { type: "number", description: "The duration amount of the task" },
-                duration_unit: { type: "string", description: "The duration unit ('minute' or 'day')", enum: ["minute", "day"] },
-                deadline_date: { type: "string", description: "Deadline date in YYYY-MM-DD format" },
-                deadline_lang: { type: "string", description: "2-letter language code for deadline parsing" }
-              },
-              anyOf: [
-                { required: ["tasks"] },
-                { required: ["content"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_get_tasks",
-            description: "Get a list of tasks from Todoist with various filters",
-            inputSchema: {
-              type: "object",
-              properties: {
-                project_id: { type: "string", description: "Filter tasks by project ID" },
-                section_id: { type: "string", description: "Filter tasks by section ID" },
-                label: { type: "string", description: "Filter tasks by label name" },
-                filter: { type: "string", description: "Natural language filter like 'today', 'tomorrow', 'next week', 'priority 1', 'overdue'" },
-                lang: { type: "string", description: "IETF language tag defining what language filter is written in" },
-                ids: { type: "array", items: { type: "string" }, description: "Array of specific task IDs to retrieve" },
-                priority: { type: "number", description: "Filter by priority level (1-4)" },
-                limit: { type: "number", description: "Maximum number of tasks to return", default: 10 }
-              }
-            }
-          },
-          {
-            name: "todoist_update_task",
-            description: "Update one or more tasks in Todoist",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tasks: {
-                  type: "array",
-                  description: "Array of tasks to update (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      task_id: { type: "string", description: "ID of the task to update (preferred)" },
-                      task_name: { type: "string", description: "Name/content of the task to search for (if ID not provided)" },
-                      content: { type: "string", description: "New content/title for the task" },
-                      description: { type: "string", description: "New description for the task" },
-                      project_id: { type: "string", description: "Move task to this project ID" },
-                      section_id: { type: "string", description: "Move task to this section ID" },
-                      labels: { type: "array", items: { type: "string" }, description: "New array of label names for the task" },
-                      priority: { type: "number", description: "New priority level from 1 (normal) to 4 (urgent)" },
-                      due_string: { type: "string", description: "New due date in natural language" },
-                      due_date: { type: "string", description: "New due date in YYYY-MM-DD format" },
-                      due_datetime: { type: "string", description: "New due date and time in RFC3339 format" },
-                      due_lang: { type: "string", description: "2-letter language code for due date parsing" },
-                      assignee_id: { type: "string", description: "New user ID to assign the task to" },
-                      duration: { type: "number", description: "New duration amount of the task" },
-                      duration_unit: { type: "string", description: "New duration unit ('minute' or 'day')" },
-                      deadline_date: { type: "string", description: "New deadline date in YYYY-MM-DD format" },
-                      deadline_lang: { type: "string", description: "2-letter language code for deadline parsing" }
-                    },
-                    anyOf: [
-                      { required: ["task_id"] },
-                      { required: ["task_name"] }
-                    ]
-                  }
-                },
-                // For backward compatibility - single task parameters
-                task_id: { type: "string", description: "ID of the task to update (preferred)" },
-                task_name: { type: "string", description: "Name/content of the task to search for (if ID not provided)" },
-                content: { type: "string", description: "New content/title for the task" },
-                description: { type: "string", description: "New description for the task" },
-                project_id: { type: "string", description: "Move task to this project ID" },
-                section_id: { type: "string", description: "Move task to this section ID" },
-                labels: { type: "array", items: { type: "string" }, description: "New array of label names for the task" },
-                priority: { type: "number", description: "New priority level from 1 (normal) to 4 (urgent)" },
-                due_string: { type: "string", description: "New due date in natural language" },
-                due_date: { type: "string", description: "New due date in YYYY-MM-DD format" },
-                due_datetime: { type: "string", description: "New due date and time in RFC3339 format" },
-                due_lang: { type: "string", description: "2-letter language code for due date parsing" },
-                assignee_id: { type: "string", description: "New user ID to assign the task to" },
-                duration: { type: "number", description: "New duration amount of the task" },
-                duration_unit: { type: "string", description: "New duration unit ('minute' or 'day')" },
-                deadline_date: { type: "string", description: "New deadline date in YYYY-MM-DD format" },
-                deadline_lang: { type: "string", description: "2-letter language code for deadline parsing" }
-              },
-              anyOf: [
-                { required: ["tasks"] },
-                { required: ["task_id"] },
-                { required: ["task_name"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_delete_task",
-            description: "Delete one or more tasks from Todoist",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tasks: {
-                  type: "array",
-                  description: "Array of tasks to delete (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      task_id: { type: "string", description: "ID of the task to delete (preferred)" },
-                      task_name: { type: "string", description: "Name/content of the task to search for and delete (if ID not provided)" }
-                    },
-                    anyOf: [
-                      { required: ["task_id"] },
-                      { required: ["task_name"] }
-                    ]
-                  }
-                },
-                // For backward compatibility - single task parameters
-                task_id: { type: "string", description: "ID of the task to delete (preferred)" },
-                task_name: { type: "string", description: "Name/content of the task to search for and delete (if ID not provided)" }
-              },
-              anyOf: [
-                { required: ["tasks"] },
-                { required: ["task_id"] },
-                { required: ["task_name"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_complete_task",
-            description: "Mark one or more tasks as complete in Todoist",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tasks: {
-                  type: "array",
-                  description: "Array of tasks to complete (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      task_id: { type: "string", description: "ID of the task to complete (preferred)" },
-                      task_name: { type: "string", description: "Name/content of the task to search for and complete (if ID not provided)" }
-                    },
-                    anyOf: [
-                      { required: ["task_id"] },
-                      { required: ["task_name"] }
-                    ]
-                  }
-                },
-                // For backward compatibility - single task parameters
-                task_id: { type: "string", description: "ID of the task to complete (preferred)" },
-                task_name: { type: "string", description: "Name/content of the task to search for and complete (if ID not provided)" }
-              },
-              anyOf: [
-                { required: ["tasks"] },
-                { required: ["task_id"] },
-                { required: ["task_name"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_get_projects",
-            description: "Get projects with optional filtering and hierarchy information",
-            inputSchema: {
-              type: "object",
-              properties: {
-                project_ids: { type: "array", items: { type: "string" }, description: "Specific project IDs to retrieve" },
-                include_sections: { type: "boolean", description: "Include sections within each project", default: false },
-                include_hierarchy: { type: "boolean", description: "Include full parent-child relationships", default: false }
-              }
-            }
-          },
-          {
-            name: "todoist_create_project",
-            description: "Create one or more projects with support for nested hierarchies",
-            inputSchema: {
-              type: "object",
-              properties: {
-                projects: {
-                  type: "array",
-                  description: "Array of projects to create (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      name: { type: "string", description: "Name of the project (required)" },
-                      parent_id: { type: "string", description: "Parent project ID" },
-                      parent_name: { type: "string", description: "Name of the parent project (will be created or found automatically)" },
-                      color: { type: "string", description: "Color of the project" },
-                      favorite: { type: "boolean", description: "Whether the project is a favorite" },
-                      view_style: { type: "string", description: "View style of the project ('list' or 'board')" },
-                      sections: { type: "array", items: { type: "string" }, description: "Sections to create within this project" }
-                    },
-                    required: ["name"]
-                  }
-                },
-                // For backward compatibility - single project parameters
-                name: { type: "string", description: "Name of the project (required)" },
-                parent_id: { type: "string", description: "Parent project ID" },
-                color: { type: "string", description: "Color of the project" },
-                favorite: { type: "boolean", description: "Whether the project is a favorite" },
-                view_style: { type: "string", description: "View style of the project ('list' or 'board')" }
-              },
-              anyOf: [
-                { required: ["projects"] },
-                { required: ["name"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_get_task_comments",
-            description: "Get comments for one or more tasks in Todoist",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tasks: {
-                  type: "array",
-                  description: "Array of tasks to get comments for (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      task_id: { type: "string", description: "ID of the task to get comments for (preferred)" },
-                      task_name: { type: "string", description: "Name/content of the task to search for and get comments (if ID not provided)" }
-                    },
-                    anyOf: [
-                      { required: ["task_id"] },
-                      { required: ["task_name"] }
-                    ]
-                  }
-                },
-                // For backward compatibility - single task parameters
-                task_id: { type: "string", description: "ID of the task to get comments for (preferred)" },
-                task_name: { type: "string", description: "Name/content of the task to search for and get comments (if ID not provided)" }
-              },
-              anyOf: [
-                { required: ["tasks"] },
-                { required: ["task_id"] },
-                { required: ["task_name"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_create_task_comment",
-            description: "Create comments for one or more tasks in Todoist",
-            inputSchema: {
-              type: "object",
-              properties: {
-                comments: {
-                  type: "array",
-                  description: "Array of comments to create (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      task_id: { type: "string", description: "ID of the task to add comment to (preferred)" },
-                      task_name: { type: "string", description: "Name/content of the task to search for and add comment (if ID not provided)" },
-                      content: { type: "string", description: "The content of the comment (required)" }
-                    },
-                    required: ["content"],
-                    anyOf: [
-                      { required: ["task_id"] },
-                      { required: ["task_name"] }
-                    ]
-                  }
-                },
-                // For backward compatibility - single comment parameters
-                task_id: { type: "string", description: "ID of the task to add comment to (preferred)" },
-                task_name: { type: "string", description: "Name/content of the task to search for and add comment (if ID not provided)" },
-                content: { type: "string", description: "The content of the comment (required)" }
-              },
-              anyOf: [
-                { required: ["comments"] },
-                { required: ["task_id", "content"] },
-                { required: ["task_name", "content"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_create_section",
-            description: "Create one or more sections in Todoist projects",
-            inputSchema: {
-              type: "object",
-              properties: {
-                sections: {
-                  type: "array",
-                  description: "Array of sections to create (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      project_id: { type: "string", description: "ID of the project to create the section in (preferred)" },
-                      project_name: { type: "string", description: "Name of the project to create the section in (if ID not provided)" },
-                      name: { type: "string", description: "Name of the section (required)" },
-                      order: { type: "number", description: "Order of the section within the project (optional)" }
-                    },
-                    required: ["name"],
-                    anyOf: [
-                      { required: ["project_id"] },
-                      { required: ["project_name"] }
-                    ]
-                  }
-                },
-                // For backward compatibility - single section parameters
-                project_id: { type: "string", description: "ID of the project to create the section in (preferred)" },
-                project_name: { type: "string", description: "Name of the project to create the section in (if ID not provided)" },
-                name: { type: "string", description: "Name of the section (required)" },
-                order: { type: "number", description: "Order of the section within the project (optional)" }
-              },
-              anyOf: [
-                { required: ["sections"] },
-                { required: ["project_id", "name"] },
-                { required: ["project_name", "name"] }
-              ]
-            }
-          },
-          {
-            name: "todoist_rename_section",
-            description: "Rename one or more sections in Todoist",
-            inputSchema: {
-              type: "object",
-              properties: {
-                sections: {
-                  type: "array",
-                  description: "Array of sections to rename (for batch operations)",
-                  items: {
-                    type: "object",
-                    properties: {
-                      section_id: { type: "string", description: "ID of the section to rename (preferred)" },
-                      section_name: { type: "string", description: "Current name of the section to search for and rename (if ID not provided)" },
-                      project_id: { type: "string", description: "ID of the project (required when using section_name)" },
-                      new_name: { type: "string", description: "New name for the section (required)" }
-                    },
-                    required: ["new_name"],
-                    anyOf: [
-                      { required: ["section_id"] },
-                      { required: ["section_name", "project_id"] }
-                    ]
-                  }
-                },
-                // For backward compatibility - single section parameters
-                section_id: { type: "string", description: "ID of the section to rename (preferred)" },
-                section_name: { type: "string", description: "Current name of the section to search for and rename (if ID not provided)" },
-                project_id: { type: "string", description: "ID of the project (required when using section_name)" },
-                new_name: { type: "string", description: "New name for the section (required)" }
-              },
-              anyOf: [
-                { required: ["sections"] },
-                { required: ["section_id", "new_name"] },
-                { required: ["section_name", "project_id", "new_name"] }
-              ]
-            }
-          }
-        ],
-      };
+  private isLegacyNumericId(value: string | null | undefined): boolean {
+    if (!value || typeof value !== 'string') return false;
+    return /^\d+$/.test(value);
+  }
+
+  private async mapLegacyIdsToUlids(resourceType: 'tasks' | 'projects' | 'sections', ids: string[]): Promise<Record<string, string>> {
+    const uncachedIds = ids.filter(id => !this.idMappingCache.has(id));
+    
+    if (uncachedIds.length === 0) {
+      const result: Record<string, string> = {};
+      for (const id of ids) {
+        const cached = this.idMappingCache.get(id);
+        if (cached) result[id] = cached;
+      }
+      return result;
+    }
+
+    try {
+      const response = await fetch(`https://api.todoist.com/sync/v9/id_mappings/${resourceType}/${uncachedIds.join(',')}`, {
+        headers: {
+          'Authorization': `Bearer ${this.todoistAuthToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        console.warn(`Failed to map legacy IDs (${response.status}): ${uncachedIds.join(',')}`);
+        return {};
+      }
+
+      const mappings = await response.json() as Record<string, string>;
+      
+      for (const [legacyId, ulid] of Object.entries(mappings)) {
+        this.idMappingCache.set(legacyId, ulid);
+      }
+
+      const result: Record<string, string> = {};
+      for (const id of ids) {
+        const mapped = this.idMappingCache.get(id);
+        if (mapped) result[id] = mapped;
+      }
+      return result;
+    } catch (error) {
+      console.error(`Error mapping legacy IDs: ${error instanceof Error ? error.message : error}`);
+      return {};
+    }
+  }
+
+  private async convertTaskIdsToUlids(tasks: Array<{ id: string; projectId?: string | null; sectionId?: string | null; parentId?: string | null; [key: string]: unknown }>): Promise<void> {
+    const taskIds = tasks.map(t => t.id).filter(id => this.isLegacyNumericId(id));
+    const projectIds = tasks.map(t => t.projectId).filter(id => this.isLegacyNumericId(id)) as string[];
+    const sectionIds = tasks.map(t => t.sectionId).filter(id => this.isLegacyNumericId(id)) as string[];
+    const parentIds = tasks.map(t => t.parentId).filter(id => this.isLegacyNumericId(id)) as string[];
+
+    const [taskMappings, projectMappings, sectionMappings, parentMappings] = await Promise.all([
+      taskIds.length ? this.mapLegacyIdsToUlids('tasks', taskIds) : Promise.resolve({} as Record<string, string>),
+      projectIds.length ? this.mapLegacyIdsToUlids('projects', projectIds) : Promise.resolve({} as Record<string, string>),
+      sectionIds.length ? this.mapLegacyIdsToUlids('sections', sectionIds) : Promise.resolve({} as Record<string, string>),
+      parentIds.length ? this.mapLegacyIdsToUlids('tasks', parentIds) : Promise.resolve({} as Record<string, string>),
+    ]) as [Record<string, string>, Record<string, string>, Record<string, string>, Record<string, string>];
+
+    for (const task of tasks) {
+      const mappedId = taskMappings[task.id];
+      if (mappedId) task.id = mappedId;
+      if (task.projectId) {
+        const mappedProjectId = projectMappings[task.projectId];
+        if (mappedProjectId) task.projectId = mappedProjectId;
+      }
+      if (task.sectionId) {
+        const mappedSectionId = sectionMappings[task.sectionId];
+        if (mappedSectionId) task.sectionId = mappedSectionId;
+      }
+      if (task.parentId) {
+        const mappedParentId = parentMappings[task.parentId];
+        if (mappedParentId) task.parentId = mappedParentId;
+      }
+    }
+  }
+
+  private async convertProjectIdsToUlids(projects: Array<{ id: string; parentId?: string | null; [key: string]: unknown }>): Promise<void> {
+    const projectIds = projects.map(p => p.id).filter(id => this.isLegacyNumericId(id));
+    const parentIds = projects.map(p => p.parentId).filter(id => this.isLegacyNumericId(id)) as string[];
+
+    const [projectMappings, parentMappings] = await Promise.all([
+      projectIds.length ? this.mapLegacyIdsToUlids('projects', projectIds) : Promise.resolve({} as Record<string, string>),
+      parentIds.length ? this.mapLegacyIdsToUlids('projects', parentIds) : Promise.resolve({} as Record<string, string>),
+    ]) as [Record<string, string>, Record<string, string>];
+
+    for (const project of projects) {
+      const mappedId = projectMappings[project.id];
+      if (mappedId) project.id = mappedId;
+      if (project.parentId) {
+        const mappedParentId = parentMappings[project.parentId];
+        if (mappedParentId) project.parentId = mappedParentId;
+      }
+    }
+  }
+
+  private async convertSectionIdsToUlids(sections: Array<{ id: string; projectId?: string | null; [key: string]: unknown }>): Promise<void> {
+    const sectionIds = sections.map(s => s.id).filter(id => this.isLegacyNumericId(id));
+    const projectIds = sections.map(s => s.projectId).filter(id => this.isLegacyNumericId(id)) as string[];
+
+    const [sectionMappings, projectMappings] = await Promise.all([
+      sectionIds.length ? this.mapLegacyIdsToUlids('sections', sectionIds) : Promise.resolve({} as Record<string, string>),
+      projectIds.length ? this.mapLegacyIdsToUlids('projects', projectIds) : Promise.resolve({} as Record<string, string>),
+    ]) as [Record<string, string>, Record<string, string>];
+
+    for (const section of sections) {
+      const mappedId = sectionMappings[section.id];
+      if (mappedId) section.id = mappedId;
+      if (section.projectId) {
+        const mappedProjectId = projectMappings[section.projectId];
+        if (mappedProjectId) section.projectId = mappedProjectId;
+      }
+    }
+  }
+
+  private async moveTodoistTask(taskId: string, options: {
+    projectId?: string | null;
+    sectionId?: string | null;
+    parentId?: string | null;
+  }) {
+    // Accept both ULID and legacy numeric IDs
+    const normalizedTaskId = ensureUlid(taskId, 'task_id');
+
+    // Verify task exists first
+    try {
+      const task = await this.todoistClient.getTask(normalizedTaskId);
+      console.log('Task exists, current location:', {
+        taskId: normalizedTaskId,
+        currentProjectId: task.projectId,
+        currentSectionId: task.sectionId,
+        currentParentId: task.parentId
+      });
+    } catch (error) {
+      console.error('Task not found before move attempt:', {
+        taskId: normalizedTaskId,
+        error: error instanceof Error ? error.message : error
+      });
+      throw new Error(`Cannot move task ${normalizedTaskId}: task not found or inaccessible`);
+    }
+
+    const payload: Record<string, string | null> = {};
+
+    if (options.projectId !== undefined) {
+      payload.project_id = options.projectId === null ? null : ensureUlid(options.projectId, 'project_id');
+    }
+
+    if (options.sectionId !== undefined) {
+      payload.section_id = options.sectionId === null ? null : ensureUlid(options.sectionId, 'section_id');
+    }
+
+    if (options.parentId !== undefined) {
+      payload.parent_id = options.parentId === null ? null : ensureUlid(options.parentId, 'parent_id');
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return undefined;
+    }
+
+    // Try REST v2 /move endpoint first
+    const moveUrl = `https://api.todoist.com/rest/v2/tasks/${encodeURIComponent(String(normalizedTaskId))}/move`;
+    
+    console.log('Attempting REST v2 move:', {
+      taskId: normalizedTaskId,
+      taskIdType: this.isLegacyNumericId(normalizedTaskId) ? 'numeric' : 'ULID',
+      payload,
+      url: moveUrl
     });
 
-    // Handle tool calls
+    const restResponse = await fetch(moveUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.todoistAuthToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    // If REST v2 succeeds, return
+    if (restResponse.ok) {
+      try {
+        const result = await restResponse.json();
+        console.log('REST v2 move succeeded:', { taskId: normalizedTaskId, result });
+        return result;
+      } catch {
+        console.log('REST v2 move succeeded (no JSON response):', { taskId: normalizedTaskId });
+        return undefined;
+      }
+    }
+
+    // If REST v2 fails with 404, try Sync API v9 as fallback
+    const restError = await restResponse.text().catch(() => '');
+    console.warn('REST v2 move failed, trying Sync API fallback:', {
+      status: restResponse.status,
+      error: restError,
+      taskId: normalizedTaskId
+    });
+
+    if (restResponse.status === 404) {
+      return await this.moveTodoistTaskViaSyncApi(normalizedTaskId, payload);
+    }
+
+    // For non-404 errors, throw immediately
+    throw new Error(`Todoist move failed (${restResponse.status}): ${restError || restResponse.statusText}. Task ID: ${normalizedTaskId}, Payload: ${JSON.stringify(payload)}`);
+  }
+
+  private async moveTodoistTaskViaSyncApi(taskId: string, payload: Record<string, string | null>) {
+    // Build Sync API v9 command
+    const command: any = {
+      type: 'item_move',
+      uuid: crypto.randomUUID(),
+      args: {
+        id: taskId
+      }
+    };
+
+    // Add fields to args
+    if (payload.project_id !== undefined) {
+      command.args.project_id = payload.project_id;
+    }
+    if (payload.section_id !== undefined) {
+      command.args.section_id = payload.section_id;
+    }
+    if (payload.parent_id !== undefined) {
+      command.args.parent_id = payload.parent_id;
+    }
+
+    console.log('Attempting Sync API v9 move:', {
+      taskId,
+      command
+    });
+
+    const syncResponse = await fetch('https://api.todoist.com/sync/v9/sync', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.todoistAuthToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        commands: [command]
+      }),
+    });
+
+    if (!syncResponse.ok) {
+      const text = await syncResponse.text().catch(() => '');
+      console.error('Sync API move failed:', {
+        status: syncResponse.status,
+        statusText: syncResponse.statusText,
+        body: text,
+        taskId,
+        command
+      });
+      throw new Error(`Todoist Sync API move failed (${syncResponse.status}): ${text || syncResponse.statusText}. Task ID: ${taskId}, Command: ${JSON.stringify(command)}`);
+    }
+
+    const syncResult = await syncResponse.json();
+    console.log('Sync API move succeeded:', { taskId, syncResult });
+
+    // Check for command errors in sync response
+    if (syncResult.sync_status) {
+      const commandStatus = syncResult.sync_status[command.uuid];
+      if (commandStatus && commandStatus !== 'ok') {
+        throw new Error(`Todoist Sync API move failed: ${JSON.stringify(commandStatus)}. Task ID: ${taskId}`);
+      }
+    }
+
+    return syncResult;
+  }
+
+  private getToolDefinitions() {
+    return [
+      {
+        name: "todoist_create_task",
+        description: "Create one or more tasks in Todoist. Accepts both ULID and legacy numeric ID formats for all identifier fields.",
+        inputSchema: {
+          type: "object",
+          required: ["tasks"],
+          additionalProperties: false,
+          properties: {
+            tasks: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of tasks to create.",
+              items: {
+                type: "object",
+                required: ["content"],
+                additionalProperties: false,
+                properties: {
+                  content: { type: "string", description: "Task content/title." },
+                  description: { type: "string", description: "Detailed description of the task." },
+                  project_id: ulidSchema("Project ULID for the new task."),
+                  section_id: ulidSchema("Section ULID for the new task."),
+                  parent_id: ulidSchema("Parent task ULID for subtasks."),
+                  labels: { type: "array", items: { type: "string" }, description: "Label names to apply." },
+                  priority: { type: "integer", minimum: 1, maximum: 4, description: "Priority from 1 (normal) to 4 (urgent)." },
+                  due_string: { type: "string", description: "Natural language due date (e.g. 'tomorrow')." },
+                  due_date: { type: "string", description: "Due date in YYYY-MM-DD format." },
+                  due_datetime: { type: "string", description: "Due date and time in RFC3339 format." },
+                  due_lang: { type: "string", description: "Language code for parsing due_string." },
+                  assignee_id: ulidSchema("User ULID to assign the task to."),
+                  duration: { type: "number", description: "Duration amount matching duration_unit." },
+                  duration_unit: { type: "string", enum: ["minute", "day"], description: "Duration unit for the provided duration." },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_get_tasks",
+        description: "Retrieve Todoist tasks with optional filters. Accepts both ULID and legacy numeric ID formats. Returns tasks with ULID identifiers.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            project_id: ulidSchema("Filter tasks by project ULID."),
+            section_id: ulidSchema("Filter tasks by section ULID."),
+            label: { type: "string", description: "Filter by label name." },
+            filter: { type: "string", description: "Natural language Todoist filter expression." },
+            lang: { type: "string", description: "Language code for filter interpretation." },
+            ids: {
+              type: "array",
+              minItems: 1,
+              description: "Specific task ULIDs to retrieve.",
+              items: ulidSchema("Task ULID to include."),
+            },
+            priority: { type: "integer", minimum: 1, maximum: 4, description: "Filter by priority 1-4." },
+            limit: { type: "integer", minimum: 1, maximum: 200, description: "Maximum number of tasks to return." },
+          },
+        },
+      },
+      {
+        name: "todoist_update_task",
+        description: "Update one or more tasks. Accepts both ULID and legacy numeric ID formats for all identifier fields.",
+        inputSchema: {
+          type: "object",
+          required: ["tasks"],
+          additionalProperties: false,
+          properties: {
+            tasks: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of task updates.",
+              items: {
+                type: "object",
+                required: ["task_id"],
+                additionalProperties: false,
+                properties: {
+                  task_id: ulidSchema("Task ULID to update."),
+                  content: { type: "string", description: "Updated task content/title." },
+                  description: { type: "string", description: "Updated task description." },
+                  project_id: ulidSchema("Target project ULID for the task."),
+                  section_id: nullableUlidSchema("Target section ULID for the task. Use null to remove the section."),
+                  parent_id: nullableUlidSchema("Parent task ULID. Use null to unparent."),
+                  labels: { type: "array", items: { type: "string" }, description: "Replace labels with the provided array." },
+                  priority: { type: "integer", minimum: 1, maximum: 4, description: "Updated priority 1-4." },
+                  due_string: { type: "string", description: "Updated natural language due date." },
+                  due_date: { type: "string", description: "Updated due date in YYYY-MM-DD format." },
+                  due_datetime: { type: "string", description: "Updated due date and time in RFC3339 format." },
+                  due_lang: {
+                    anyOf: [
+                      { type: "string" },
+                      { type: "null" },
+                    ],
+                    description: "Language code for due parsing or null to reset.",
+                  },
+                  assignee_id: nullableUlidSchema("Assigned user ULID or null to unassign."),
+                  duration: { type: "number", description: "Updated duration amount." },
+                  duration_unit: { type: "string", enum: ["minute", "day"], description: "Updated duration unit." },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_delete_task",
+        description: "Delete one or more tasks. Accepts both ULID and legacy numeric ID formats.",
+        inputSchema: {
+          type: "object",
+          required: ["tasks"],
+          additionalProperties: false,
+          properties: {
+            tasks: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of task deletions.",
+              items: {
+                type: "object",
+                required: ["task_id"],
+                additionalProperties: false,
+                properties: {
+                  task_id: ulidSchema("Task ULID to delete."),
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_complete_task",
+        description: "Mark one or more tasks complete. Accepts both ULID and legacy numeric ID formats.",
+        inputSchema: {
+          type: "object",
+          required: ["tasks"],
+          additionalProperties: false,
+          properties: {
+            tasks: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of task completions.",
+              items: {
+                type: "object",
+                required: ["task_id"],
+                additionalProperties: false,
+                properties: {
+                  task_id: ulidSchema("Task ULID to complete."),
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_get_projects",
+        description: "List Todoist projects with optional filtering. Accepts both ULID and legacy numeric ID formats. Returns projects with ULID identifiers.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            project_ids: {
+              type: "array",
+              minItems: 1,
+              description: "Specific project ULIDs to retrieve.",
+              items: ulidSchema("Project ULID to include."),
+            },
+            include_sections: { type: "boolean", description: "Include sections for each project." },
+            include_hierarchy: { type: "boolean", description: "Include child project ULIDs for hierarchy." },
+          },
+        },
+      },
+      {
+        name: "todoist_create_project",
+        description: "Create one or more projects. Accepts both ULID and legacy numeric ID formats for parent project references.",
+        inputSchema: {
+          type: "object",
+          required: ["projects"],
+          additionalProperties: false,
+          properties: {
+            projects: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of project definitions.",
+              items: {
+                type: "object",
+                required: ["name"],
+                additionalProperties: false,
+                properties: {
+                  name: { type: "string", description: "Project name." },
+                  parent_id: ulidSchema("Optional parent project ULID."),
+                  color: { type: "string", description: "Project color identifier." },
+                  favorite: { type: "boolean", description: "Mark project as favorite." },
+                  view_style: { type: "string", enum: ["list", "board"], description: "Project view style." },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_get_task_comments",
+        description: "Fetch comments for one or more tasks. Accepts both ULID and legacy numeric ID formats.",
+        inputSchema: {
+          type: "object",
+          required: ["tasks"],
+          additionalProperties: false,
+          properties: {
+            tasks: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of task identifiers.",
+              items: {
+                type: "object",
+                required: ["task_id"],
+                additionalProperties: false,
+                properties: {
+                  task_id: ulidSchema("Task ULID to fetch comments for."),
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_create_task_comment",
+        description: "Create comments for one or more tasks. Accepts both ULID and legacy numeric ID formats.",
+        inputSchema: {
+          type: "object",
+          required: ["comments"],
+          additionalProperties: false,
+          properties: {
+            comments: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of comments to create.",
+              items: {
+                type: "object",
+                required: ["task_id", "content"],
+                additionalProperties: false,
+                properties: {
+                  task_id: ulidSchema("Task ULID to attach the comment to."),
+                  content: { type: "string", description: "Comment body." },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_create_section",
+        description: "Create one or more sections. Accepts both ULID and legacy numeric ID formats for project_id.",
+        inputSchema: {
+          type: "object",
+          required: ["sections"],
+          additionalProperties: false,
+          properties: {
+            sections: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of sections to create.",
+              items: {
+                type: "object",
+                required: ["project_id", "name"],
+                additionalProperties: false,
+                properties: {
+                  project_id: ulidSchema("Project ULID where the section will be created."),
+                  name: { type: "string", description: "Section name." },
+                  order: { type: "integer", description: "Optional sort order for the section." },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "todoist_rename_section",
+        description: "Rename sections. Accepts both ULID and legacy numeric ID formats for section_id.",
+        inputSchema: {
+          type: "object",
+          required: ["sections"],
+          additionalProperties: false,
+          properties: {
+            sections: {
+              type: "array",
+              minItems: 1,
+              description: "Non-empty array of section renames.",
+              items: {
+                type: "object",
+                required: ["section_id", "new_name"],
+                additionalProperties: false,
+                properties: {
+                  section_id: ulidSchema("Section ULID to rename."),
+                  new_name: { type: "string", description: "Updated section name." },
+                },
+              },
+            },
+          },
+        },
+      },
+    ];
+  }
+
+  private setupHandlers() {
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: this.getToolDefinitions(),
+    }));
+
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
+        const args = request.params.arguments ?? {};
         switch (request.params.name) {
-          case 'todoist_create_task': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch task creation
-            if (args.tasks && args.tasks.length > 0) {
-              const results = await Promise.all(args.tasks.map(async (taskData: any) => {
-                try {
-                  const apiParams: any = {
-                    content: taskData.content,
-                    description: taskData.description,
-                    projectId: taskData.project_id,
-                    sectionId: taskData.section_id,
-                    parentId: taskData.parent_id,
-                    order: taskData.order,
-                    labels: taskData.labels,
-                    priority: taskData.priority,
-                    dueString: taskData.due_string,
-                    dueDate: taskData.due_date,
-                    dueDatetime: taskData.due_datetime,
-                    dueLang: taskData.due_lang,
-                    assigneeId: taskData.assignee_id,
-                    duration: taskData.duration,
-                    durationUnit: taskData.duration_unit,
-                    deadlineDate: taskData.deadline_date,
-                    deadlineLang: taskData.deadline_lang
-                  };
-
-                  const task = await this.todoistClient.addTask(apiParams);
-                  return {
-                    success: true,
-                    task_id: task.id,
-                    content: task.content
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    taskData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.tasks.length,
-                    summary: {
-                      total: args.tasks.length,
-                      succeeded: successCount,
-                      failed: args.tasks.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.tasks.length
-              };
-            }
-            // Handle single task creation (backward compatibility)
-            else {
-              const apiParams: any = {
-                content: args.content,
-                description: args.description,
-                projectId: args.project_id,
-                sectionId: args.section_id,
-                parentId: args.parent_id,
-                order: args.order,
-                labels: args.labels,
-                priority: args.priority,
-                dueString: args.due_string,
-                dueDate: args.due_date,
-                dueDatetime: args.due_datetime,
-                dueLang: args.due_lang,
-                assigneeId: args.assignee_id,
-                duration: args.duration,
-                durationUnit: args.duration_unit,
-                deadlineDate: args.deadline_date,
-                deadlineLang: args.deadline_lang
-              };
-
-              const task = await this.todoistClient.addTask(apiParams);
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    task_id: task.id,
-                    content: task.content
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_get_tasks': {
-            const args = request.params.arguments as any;
-            const tasks = await this.todoistClient.getTasks();
-            
-            // Apply filters
-            let filteredTasks = tasks;
-            
-            if (args.project_id) {
-              filteredTasks = filteredTasks.filter(task => task.projectId === args.project_id);
-            }
-            if (args.section_id) {
-              filteredTasks = filteredTasks.filter(task => task.sectionId === args.section_id);
-            }
-            if (args.label) {
-              filteredTasks = filteredTasks.filter(task => task.labels?.includes(args.label));
-            }
-            if (args.priority) {
-              filteredTasks = filteredTasks.filter(task => task.priority === args.priority);
-            }
-            if (args.ids) {
-              filteredTasks = filteredTasks.filter(task => args.ids.includes(task.id));
-            }
-            
-            // Apply limit
-            const limit = args.limit || 10;
-            filteredTasks = filteredTasks.slice(0, limit);
-            
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({
-                  success: true,
-                  tasks: filteredTasks.map(task => ({
-                    id: task.id,
-                    content: task.content,
-                    description: task.description,
-                    project_id: task.projectId,
-                    section_id: task.sectionId,
-                    parent_id: task.parentId,
-                    order: task.order,
-                    labels: task.labels,
-                    priority: task.priority,
-                    due: task.due,
-                    assignee_id: task.assigneeId,
-                    duration: task.duration,
-                    duration_unit: task.duration,
-                    completed: task.isCompleted
-                  }))
-                }, null, 2)
-              }],
-              isError: false
-            };
-          }
-
-          case 'todoist_update_task': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch task updates
-            if (args.tasks && args.tasks.length > 0) {
-              const allTasks = await this.todoistClient.getTasks();
-              
-              const results = await Promise.all(args.tasks.map(async (taskData: any) => {
-                try {
-                  let taskId = taskData.task_id;
-                  
-                  if (!taskId && taskData.task_name) {
-                    const matchingTask = allTasks.find(task => 
-                      task.content.toLowerCase().includes(taskData.task_name.toLowerCase())
-                    );
-                    if (!matchingTask) {
-                      return {
-                        success: false,
-                        error: `Task not found: ${taskData.task_name}`,
-                        task_name: taskData.task_name
-                      };
-                    }
-                    taskId = matchingTask.id;
-                  }
-                  
-                  if (!taskId) {
-                    return {
-                      success: false,
-                      error: "Either task_id or task_name must be provided",
-                      taskData
-                    };
-                  }
-
-                  const updateParams: any = {};
-                  if (taskData.content) updateParams.content = taskData.content;
-                  if (taskData.description) updateParams.description = taskData.description;
-                  if (taskData.project_id) updateParams.projectId = taskData.project_id;
-                  if (taskData.section_id) updateParams.sectionId = taskData.section_id;
-                  if (taskData.labels) updateParams.labels = taskData.labels;
-                  if (taskData.priority) updateParams.priority = taskData.priority;
-                  if (taskData.due_string) updateParams.dueString = taskData.due_string;
-                  if (taskData.due_date) updateParams.dueDate = taskData.due_date;
-                  if (taskData.due_datetime) updateParams.dueDatetime = taskData.due_datetime;
-                  if (taskData.due_lang) updateParams.dueLang = taskData.due_lang;
-                  if (taskData.assignee_id) updateParams.assigneeId = taskData.assignee_id;
-                  if (taskData.duration) updateParams.duration = taskData.duration;
-                  if (taskData.duration_unit) updateParams.durationUnit = taskData.duration_unit;
-                  if (taskData.deadline_date) updateParams.deadlineDate = taskData.deadline_date;
-                  if (taskData.deadline_lang) updateParams.deadlineLang = taskData.deadline_lang;
-
-                  await this.todoistClient.updateTask(taskId, updateParams);
-                  return {
-                    success: true,
-                    task_id: taskId,
-                    content: taskData.content || `Task ID: ${taskId}`
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    taskData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.tasks.length,
-                    summary: {
-                      total: args.tasks.length,
-                      succeeded: successCount,
-                      failed: args.tasks.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.tasks.length
-              };
-            }
-            // Handle single task update (backward compatibility)
-            else {
-              let taskId = args.task_id;
-              
-              if (!taskId && args.task_name) {
-                const tasks = await this.todoistClient.getTasks();
-                const matchingTask = tasks.find(task => 
-                  task.content.toLowerCase().includes(args.task_name.toLowerCase())
-                );
-                if (!matchingTask) {
-                  return {
-                    content: [{
-                      type: 'text',
-                      text: JSON.stringify({
-                        success: false,
-                        error: `Task not found: ${args.task_name}`
-                      }, null, 2)
-                    }],
-                    isError: true
-                  };
-                }
-                taskId = matchingTask.id;
-              }
-              
-              if (!taskId) {
-                throw new Error("Either task_id or task_name must be provided");
-              }
-
-              const updateParams: any = {};
-              if (args.content) updateParams.content = args.content;
-              if (args.description) updateParams.description = args.description;
-              if (args.project_id) updateParams.projectId = args.project_id;
-              if (args.section_id) updateParams.sectionId = args.section_id;
-              if (args.labels) updateParams.labels = args.labels;
-              if (args.priority) updateParams.priority = args.priority;
-              if (args.due_string) updateParams.dueString = args.due_string;
-              if (args.due_date) updateParams.dueDate = args.due_date;
-              if (args.due_datetime) updateParams.dueDatetime = args.due_datetime;
-              if (args.due_lang) updateParams.dueLang = args.due_lang;
-              if (args.assignee_id) updateParams.assigneeId = args.assignee_id;
-              if (args.duration) updateParams.duration = args.duration;
-              if (args.duration_unit) updateParams.durationUnit = args.duration_unit;
-              if (args.deadline_date) updateParams.deadlineDate = args.deadline_date;
-              if (args.deadline_lang) updateParams.deadlineLang = args.deadline_lang;
-
-              await this.todoistClient.updateTask(taskId, updateParams);
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    task_id: taskId,
-                    content: args.content || `Task ID: ${taskId}`
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_delete_task': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch task deletion
-            if (args.tasks && args.tasks.length > 0) {
-              const allTasks = await this.todoistClient.getTasks();
-              
-              const results = await Promise.all(args.tasks.map(async (taskData: any) => {
-                try {
-                  let taskId = taskData.task_id;
-                  
-                  if (!taskId && taskData.task_name) {
-                    const matchingTask = allTasks.find(task => 
-                      task.content.toLowerCase().includes(taskData.task_name.toLowerCase())
-                    );
-                    if (!matchingTask) {
-                      return {
-                        success: false,
-                        error: `Task not found: ${taskData.task_name}`,
-                        task_name: taskData.task_name
-                      };
-                    }
-                    taskId = matchingTask.id;
-                  }
-                  
-                  if (!taskId) {
-                    return {
-                      success: false,
-                      error: "Either task_id or task_name must be provided",
-                      taskData
-                    };
-                  }
-
-                  await this.todoistClient.deleteTask(taskId);
-                  return {
-                    success: true,
-                    task_id: taskId,
-                    content: taskData.task_name || `Task ID: ${taskId}`
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    taskData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.tasks.length,
-                    summary: {
-                      total: args.tasks.length,
-                      succeeded: successCount,
-                      failed: args.tasks.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.tasks.length
-              };
-            }
-            // Handle single task deletion (backward compatibility)
-            else {
-              let taskId = args.task_id;
-              
-              if (!taskId && args.task_name) {
-                const tasks = await this.todoistClient.getTasks();
-                const matchingTask = tasks.find(task => 
-                  task.content.toLowerCase().includes(args.task_name.toLowerCase())
-                );
-                if (!matchingTask) {
-                  return {
-                    content: [{
-                      type: 'text',
-                      text: JSON.stringify({
-                        success: false,
-                        error: `Task not found: ${args.task_name}`
-                      }, null, 2)
-                    }],
-                    isError: true
-                  };
-                }
-                taskId = matchingTask.id;
-              }
-              
-              if (!taskId) {
-                throw new Error("Either task_id or task_name must be provided");
-              }
-
-              await this.todoistClient.deleteTask(taskId);
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    task_id: taskId,
-                    content: args.task_name || `Task ID: ${taskId}`
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_complete_task': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch task completion
-            if (args.tasks && args.tasks.length > 0) {
-              const allTasks = await this.todoistClient.getTasks();
-              
-              const results = await Promise.all(args.tasks.map(async (taskData: any) => {
-                try {
-                  let taskId = taskData.task_id;
-                  
-                  if (!taskId && taskData.task_name) {
-                    const matchingTask = allTasks.find(task => 
-                      task.content.toLowerCase().includes(taskData.task_name.toLowerCase())
-                    );
-                    if (!matchingTask) {
-                      return {
-                        success: false,
-                        error: `Task not found: ${taskData.task_name}`,
-                        task_name: taskData.task_name
-                      };
-                    }
-                    taskId = matchingTask.id;
-                  }
-                  
-                  if (!taskId) {
-                    return {
-                      success: false,
-                      error: "Either task_id or task_name must be provided",
-                      taskData
-                    };
-                  }
-
-                  await this.todoistClient.closeTask(taskId);
-                  return {
-                    success: true,
-                    task_id: taskId,
-                    content: taskData.task_name || `Task ID: ${taskId}`
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    taskData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.tasks.length,
-                    summary: {
-                      total: args.tasks.length,
-                      succeeded: successCount,
-                      failed: args.tasks.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.tasks.length
-              };
-            }
-            // Handle single task completion (backward compatibility)
-            else {
-              let taskId = args.task_id;
-              
-              if (!taskId && args.task_name) {
-                const tasks = await this.todoistClient.getTasks();
-                const matchingTask = tasks.find(task => 
-                  task.content.toLowerCase().includes(args.task_name.toLowerCase())
-                );
-                if (!matchingTask) {
-                  return {
-                    content: [{
-                      type: 'text',
-                      text: JSON.stringify({
-                        success: false,
-                        error: `Task not found: ${args.task_name}`
-                      }, null, 2)
-                    }],
-                    isError: true
-                  };
-                }
-                taskId = matchingTask.id;
-              }
-              
-              if (!taskId) {
-                throw new Error("Either task_id or task_name must be provided");
-              }
-
-              await this.todoistClient.closeTask(taskId);
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    task_id: taskId,
-                    content: args.task_name || `Task ID: ${taskId}`
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_get_projects': {
-            const args = request.params.arguments as any;
-            const projects = await this.todoistClient.getProjects();
-            
-            let filteredProjects = projects;
-            
-            if (args.project_ids) {
-              filteredProjects = filteredProjects.filter(project => 
-                args.project_ids.includes(project.id)
-              );
-            }
-            
-            const result = filteredProjects.map(project => ({
-              id: project.id,
-              name: project.name,
-              color: project.color,
-              parent_id: project.parentId,
-              order: project.order,
-              comment_count: project.commentCount,
-              is_shared: project.isShared,
-              is_favorite: project.isFavorite,
-              is_inbox_project: project.isInboxProject,
-              is_team_inbox: project.isTeamInbox,
-              view_style: project.viewStyle,
-              url: project.url,
-              created_at: null
-            }));
-
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({
-                  success: true,
-                  projects: result
-                }, null, 2)
-              }],
-              isError: false
-            };
-          }
-
-          case 'todoist_create_project': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch project creation
-            if (args.projects && args.projects.length > 0) {
-              const results = await Promise.all(args.projects.map(async (projectData: any) => {
-                try {
-                  const apiParams: any = {
-                    name: projectData.name,
-                    parentId: projectData.parent_id,
-                    color: projectData.color,
-                    isFavorite: projectData.favorite,
-                    viewStyle: projectData.view_style
-                  };
-
-                  const project = await this.todoistClient.addProject(apiParams);
-                  return {
-                    success: true,
-                    project_id: project.id,
-                    name: project.name
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    projectData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.projects.length,
-                    summary: {
-                      total: args.projects.length,
-                      succeeded: successCount,
-                      failed: args.projects.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.projects.length
-              };
-            }
-            // Handle single project creation (backward compatibility)
-            else {
-              const apiParams: any = {
-                name: args.name,
-                parentId: args.parent_id,
-                color: args.color,
-                isFavorite: args.favorite,
-                viewStyle: args.view_style
-              };
-
-              const project = await this.todoistClient.addProject(apiParams);
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    project_id: project.id,
-                    name: project.name
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_get_task_comments': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch comment retrieval
-            if (args.tasks && args.tasks.length > 0) {
-              const allTasks = await this.todoistClient.getTasks();
-              
-              const results = await Promise.all(args.tasks.map(async (taskData: any) => {
-                try {
-                  let taskId = taskData.task_id;
-                  
-                  if (!taskId && taskData.task_name) {
-                    const matchingTask = allTasks.find(task => 
-                      task.content.toLowerCase().includes(taskData.task_name.toLowerCase())
-                    );
-                    if (!matchingTask) {
-                      return {
-                        success: false,
-                        error: `Task not found: ${taskData.task_name}`,
-                        task_name: taskData.task_name
-                      };
-                    }
-                    taskId = matchingTask.id;
-                  }
-                  
-                  if (!taskId) {
-                    return {
-                      success: false,
-                      error: "Either task_id or task_name must be provided",
-                      taskData
-                    };
-                  }
-
-                  const comments = await this.todoistClient.getComments({ taskId });
-                  return {
-                    success: true,
-                    task_id: taskId,
-                    content: taskData.task_name || `Task ID: ${taskId}`,
-                    comments: comments.map(comment => ({
-                      id: comment.id,
-                      content: comment.content,
-                      posted_at: comment.postedAt
-                    }))
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    taskData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.tasks.length,
-                    summary: {
-                      total: args.tasks.length,
-                      succeeded: successCount,
-                      failed: args.tasks.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.tasks.length
-              };
-            }
-            // Handle single task comment retrieval (backward compatibility)
-            else {
-              let taskId = args.task_id;
-              
-              if (!taskId && args.task_name) {
-                const tasks = await this.todoistClient.getTasks();
-                const matchingTask = tasks.find(task => 
-                  task.content.toLowerCase().includes(args.task_name.toLowerCase())
-                );
-                if (!matchingTask) {
-                  return {
-                    content: [{
-                      type: 'text',
-                      text: JSON.stringify({
-                        success: false,
-                        error: `Task not found: ${args.task_name}`
-                      }, null, 2)
-                    }],
-                    isError: true
-                  };
-                }
-                taskId = matchingTask.id;
-              }
-              
-              if (!taskId) {
-                throw new Error("Either task_id or task_name must be provided");
-              }
-
-              const comments = await this.todoistClient.getComments({ taskId });
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    task_id: taskId,
-                    content: args.task_name || `Task ID: ${taskId}`,
-                    comments: comments.map(comment => ({
-                      id: comment.id,
-                      content: comment.content,
-                      posted_at: comment.postedAt
-                    }))
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_create_task_comment': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch comment creation
-            if (args.comments && args.comments.length > 0) {
-              const allTasks = await this.todoistClient.getTasks();
-              
-              const results = await Promise.all(args.comments.map(async (commentData: any) => {
-                try {
-                  let taskId = commentData.task_id;
-                  
-                  if (!taskId && commentData.task_name) {
-                    const matchingTask = allTasks.find(task => 
-                      task.content.toLowerCase().includes(commentData.task_name.toLowerCase())
-                    );
-                    if (!matchingTask) {
-                      return {
-                        success: false,
-                        error: `Task not found: ${commentData.task_name}`,
-                        task_name: commentData.task_name
-                      };
-                    }
-                    taskId = matchingTask.id;
-                  }
-                  
-                  if (!taskId) {
-                    return {
-                      success: false,
-                      error: "Either task_id or task_name must be provided",
-                      commentData
-                    };
-                  }
-
-                  const comment = await this.todoistClient.addComment({
-                    taskId,
-                    content: commentData.content
-                  });
-                  
-                  return {
-                    success: true,
-                    task_id: taskId,
-                    content: commentData.task_name || `Task ID: ${taskId}`,
-                    comment: {
-                      id: comment.id,
-                      content: comment.content,
-                      posted_at: comment.postedAt
-                    }
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    commentData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.comments.length,
-                    summary: {
-                      total: args.comments.length,
-                      succeeded: successCount,
-                      failed: args.comments.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.comments.length
-              };
-            }
-            // Handle single comment creation (backward compatibility)
-            else {
-              let taskId = args.task_id;
-              
-              if (!taskId && args.task_name) {
-                const tasks = await this.todoistClient.getTasks();
-                const matchingTask = tasks.find(task => 
-                  task.content.toLowerCase().includes(args.task_name.toLowerCase())
-                );
-                if (!matchingTask) {
-                  return {
-                    content: [{
-                      type: 'text',
-                      text: JSON.stringify({
-                        success: false,
-                        error: `Task not found: ${args.task_name}`
-                      }, null, 2)
-                    }],
-                    isError: true
-                  };
-                }
-                taskId = matchingTask.id;
-              }
-              
-              if (!taskId) {
-                throw new Error("Either task_id or task_name must be provided");
-              }
-
-              const comment = await this.todoistClient.addComment({
-                taskId,
-                content: args.content
-              });
-              
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    task_id: taskId,
-                    content: args.task_name || `Task ID: ${taskId}`,
-                    comment: {
-                      id: comment.id,
-                      content: comment.content,
-                      posted_at: comment.postedAt
-                    }
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_create_section': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch section creation
-            if (args.sections && args.sections.length > 0) {
-              const allProjects = await this.todoistClient.getProjects();
-              
-              const results = await Promise.all(args.sections.map(async (sectionData: any) => {
-                try {
-                  let projectId = sectionData.project_id;
-                  
-                  if (!projectId && sectionData.project_name) {
-                    const matchingProject = allProjects.find(project => 
-                      project.name.toLowerCase().includes(sectionData.project_name.toLowerCase())
-                    );
-                    if (!matchingProject) {
-                      return {
-                        success: false,
-                        error: `Project not found: ${sectionData.project_name}`,
-                        project_name: sectionData.project_name
-                      };
-                    }
-                    projectId = matchingProject.id;
-                  }
-                  
-                  if (!projectId) {
-                    return {
-                      success: false,
-                      error: "Either project_id or project_name must be provided",
-                      sectionData
-                    };
-                  }
-
-                  const apiParams: any = {
-                    name: sectionData.name,
-                    projectId: projectId
-                  };
-                  
-                  if (sectionData.order !== undefined) {
-                    apiParams.order = sectionData.order;
-                  }
-
-                  const section = await this.todoistClient.addSection(apiParams);
-                  return {
-                    success: true,
-                    section_id: section.id,
-                    name: section.name,
-                    project_id: section.projectId
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    sectionData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.sections.length,
-                    summary: {
-                      total: args.sections.length,
-                      succeeded: successCount,
-                      failed: args.sections.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.sections.length
-              };
-            }
-            // Handle single section creation (backward compatibility)
-            else {
-              let projectId = args.project_id;
-              
-              if (!projectId && args.project_name) {
-                const projects = await this.todoistClient.getProjects();
-                const matchingProject = projects.find(project => 
-                  project.name.toLowerCase().includes(args.project_name.toLowerCase())
-                );
-                if (!matchingProject) {
-                  return {
-                    content: [{
-                      type: 'text',
-                      text: JSON.stringify({
-                        success: false,
-                        error: `Project not found: ${args.project_name}`
-                      }, null, 2)
-                    }],
-                    isError: true
-                  };
-                }
-                projectId = matchingProject.id;
-              }
-              
-              if (!projectId) {
-                throw new Error("Either project_id or project_name must be provided");
-              }
-
-              const apiParams: any = {
-                name: args.name,
-                projectId: projectId
-              };
-              
-              if (args.order !== undefined) {
-                apiParams.order = args.order;
-              }
-
-              const section = await this.todoistClient.addSection(apiParams);
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    section_id: section.id,
-                    name: section.name,
-                    project_id: section.projectId
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
-          case 'todoist_rename_section': {
-            const args = request.params.arguments as any;
-            
-            // Handle batch section renaming
-            if (args.sections && args.sections.length > 0) {
-              const results = await Promise.all(args.sections.map(async (sectionData: any) => {
-                try {
-                  let sectionId = sectionData.section_id;
-                  
-                  if (!sectionId && sectionData.section_name && sectionData.project_id) {
-                    const sections = await this.todoistClient.getSections(sectionData.project_id);
-                    const matchingSection = sections.find(section => 
-                      section.name.toLowerCase().includes(sectionData.section_name.toLowerCase())
-                    );
-                    if (!matchingSection) {
-                      return {
-                        success: false,
-                        error: `Section not found: ${sectionData.section_name}`,
-                        section_name: sectionData.section_name
-                      };
-                    }
-                    sectionId = matchingSection.id;
-                  }
-                  
-                  if (!sectionId) {
-                    return {
-                      success: false,
-                      error: "Either section_id or (section_name and project_id) must be provided",
-                      sectionData
-                    };
-                  }
-
-                  const section = await this.todoistClient.updateSection(sectionId, {
-                    name: sectionData.new_name
-                  });
-                  
-                  return {
-                    success: true,
-                    section_id: section.id,
-                    old_name: sectionData.section_name || "N/A",
-                    new_name: section.name,
-                    project_id: section.projectId
-                  };
-                } catch (error) {
-                  return {
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error),
-                    sectionData
-                  };
-                }
-              }));
-
-              const successCount = results.filter(r => r.success).length;
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: successCount === args.sections.length,
-                    summary: {
-                      total: args.sections.length,
-                      succeeded: successCount,
-                      failed: args.sections.length - successCount
-                    },
-                    results
-                  }, null, 2)
-                }],
-                isError: successCount < args.sections.length
-              };
-            }
-            // Handle single section renaming (backward compatibility)
-            else {
-              let sectionId = args.section_id;
-              
-              if (!sectionId && args.section_name && args.project_id) {
-                const sections = await this.todoistClient.getSections(args.project_id);
-                const matchingSection = sections.find(section => 
-                  section.name.toLowerCase().includes(args.section_name.toLowerCase())
-                );
-                if (!matchingSection) {
-                  return {
-                    content: [{
-                      type: 'text',
-                      text: JSON.stringify({
-                        success: false,
-                        error: `Section not found: ${args.section_name}`
-                      }, null, 2)
-                    }],
-                    isError: true
-                  };
-                }
-                sectionId = matchingSection.id;
-              }
-              
-              if (!sectionId) {
-                throw new Error("Either section_id or (section_name and project_id) must be provided");
-              }
-
-              const section = await this.todoistClient.updateSection(sectionId, {
-                name: args.new_name
-              });
-              
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    success: true,
-                    section_id: section.id,
-                    old_name: args.section_name || "N/A",
-                    new_name: section.name,
-                    project_id: section.projectId
-                  }, null, 2)
-                }],
-                isError: false
-              };
-            }
-          }
-
+          case 'todoist_create_task':
+            return await this.handleCreateTasks(args);
+          case 'todoist_get_tasks':
+            return await this.handleGetTasks(args);
+          case 'todoist_update_task':
+            return await this.handleUpdateTasks(args);
+          case 'todoist_delete_task':
+            return await this.handleDeleteTasks(args);
+          case 'todoist_complete_task':
+            return await this.handleCompleteTasks(args);
+          case 'todoist_get_projects':
+            return await this.handleGetProjects(args);
+          case 'todoist_create_project':
+            return await this.handleCreateProjects(args);
+          case 'todoist_get_task_comments':
+            return await this.handleGetTaskComments(args);
+          case 'todoist_create_task_comment':
+            return await this.handleCreateTaskComments(args);
+          case 'todoist_create_section':
+            return await this.handleCreateSections(args);
+          case 'todoist_rename_section':
+            return await this.handleRenameSections(args);
           default:
             throw new Error(`Unknown tool: ${request.params.name}`);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${errorMessage}`,
-            },
-          ],
-          isError: true,
-        };
+        console.error('MCP CallTool error', { tool: request.params.name, error: errorMessage });
+        return buildToolResponse({ success: false, error: errorMessage }, true);
       }
     });
   }
 
+  private async handleCreateTasks(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const taskInputs = ensureNonEmptyArray<unknown>(args.tasks, 'tasks');
+
+    const results = taskInputs.map(async (rawTask) => {
+      const taskData = ensureObject<Record<string, unknown>>(rawTask, 'tasks[]');
+      try {
+        const apiParams: Record<string, unknown> = {
+          content: ensureString(taskData.content, 'tasks[].content'),
+        };
+
+        const description = ensureOptionalString(taskData.description, 'tasks[].description');
+        if (description !== undefined) apiParams.description = description;
+
+        const projectId = ensureOptionalUlid(taskData.project_id, 'tasks[].project_id');
+        if (projectId !== undefined) apiParams.projectId = projectId;
+
+        const sectionId = ensureOptionalUlid(taskData.section_id, 'tasks[].section_id');
+        if (sectionId !== undefined) apiParams.sectionId = sectionId;
+
+        const parentId = ensureOptionalUlid(taskData.parent_id, 'tasks[].parent_id');
+        if (parentId !== undefined) apiParams.parentId = parentId;
+
+        const labels = ensureStringArray(taskData.labels, 'tasks[].labels');
+        if (labels !== undefined) apiParams.labels = labels;
+
+        const priority = ensureOptionalIntegerInRange(taskData.priority, 'tasks[].priority', 1, 4);
+        if (priority !== undefined) apiParams.priority = priority;
+
+        const dueString = ensureOptionalString(taskData.due_string, 'tasks[].due_string');
+        if (dueString !== undefined) apiParams.dueString = dueString;
+
+        const dueDate = ensureOptionalString(taskData.due_date, 'tasks[].due_date');
+        const dueDatetime = ensureOptionalString(taskData.due_datetime, 'tasks[].due_datetime');
+        if (dueDate !== undefined && dueDatetime !== undefined) {
+          throw new Error("tasks[].due_date and tasks[].due_datetime cannot both be provided");
+        }
+        if (dueDate !== undefined) apiParams.dueDate = dueDate;
+        if (dueDatetime !== undefined) apiParams.dueDatetime = dueDatetime;
+
+        const dueLang = ensureOptionalString(taskData.due_lang, 'tasks[].due_lang');
+        if (dueLang !== undefined) apiParams.dueLang = dueLang;
+
+        const assigneeId = ensureOptionalUlid(taskData.assignee_id, 'tasks[].assignee_id');
+        if (assigneeId !== undefined) apiParams.assigneeId = assigneeId;
+
+        const duration = ensureOptionalNumber(taskData.duration, 'tasks[].duration');
+        const durationUnit = ensureOptionalEnum(taskData.duration_unit, 'tasks[].duration_unit', ['minute', 'day'] as const);
+        if ((duration !== undefined && durationUnit === undefined) || (duration === undefined && durationUnit !== undefined)) {
+          throw new Error("tasks[].duration and tasks[].duration_unit must be provided together");
+        }
+        if (duration !== undefined && durationUnit !== undefined) {
+          apiParams.duration = duration;
+          apiParams.durationUnit = durationUnit;
+        }
+
+        const task = await this.todoistClient.addTask(apiParams as any);
+                  console.log('Task created', { id: task.id, content: task.content });
+
+                  return {
+                    success: true,
+                    task_id: task.id,
+          content: task.content,
+                  };
+                } catch (error) {
+        console.error('Task creation failed', { error, taskData });
+                  return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+          task: taskData,
+        };
+      }
+    });
+
+    const resolvedResults = await Promise.all(results);
+    return buildBatchResponse(resolvedResults, taskInputs.length);
+  }
+
+  private async handleGetTasks(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+
+    const projectId = ensureOptionalUlid(args.project_id, 'project_id');
+    const sectionId = ensureOptionalUlid(args.section_id, 'section_id');
+    const label = ensureOptionalString(args.label, 'label');
+    const filter = ensureOptionalString(args.filter, 'filter');
+    const lang = ensureOptionalString(args.lang, 'lang');
+    const ids = ensureUlidArray(args.ids, 'ids');
+    const priority = ensureOptionalIntegerInRange(args.priority, 'priority', 1, 4);
+    const limit = ensureOptionalIntegerInRange(args.limit, 'limit', 1, 200);
+
+    const requestArgs: Record<string, unknown> = {};
+    if (projectId !== undefined) requestArgs.projectId = projectId;
+    if (sectionId !== undefined) requestArgs.sectionId = sectionId;
+    if (label !== undefined) requestArgs.label = label;
+    if (filter !== undefined) requestArgs.filter = filter;
+    if (lang !== undefined) requestArgs.lang = lang;
+    if (ids !== undefined) requestArgs.ids = ids;
+
+    const tasks = await this.todoistClient.getTasks(Object.keys(requestArgs).length ? (requestArgs as any) : undefined);
+
+    // Convert any legacy numeric IDs to ULIDs
+    await this.convertTaskIdsToUlids(tasks as any);
+
+    let filteredTasks = tasks;
+    if (priority !== undefined) {
+      filteredTasks = filteredTasks.filter(task => task.priority === priority);
+    }
+    if (limit !== undefined) {
+      filteredTasks = filteredTasks.slice(0, limit);
+    }
+
+    return buildToolResponse({
+      success: true,
+      tasks: filteredTasks.map(task => ({
+        id: task.id,
+        content: task.content,
+        description: task.description,
+        project_id: task.projectId,
+        section_id: task.sectionId,
+        parent_id: task.parentId,
+        order: task.order,
+        labels: task.labels,
+        priority: task.priority,
+        due: task.due,
+        assignee_id: task.assigneeId,
+        duration: task.duration?.amount ?? null,
+        duration_unit: task.duration?.unit ?? null,
+        completed: task.isCompleted,
+      })),
+    }, false);
+  }
+
+  private async handleUpdateTasks(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const taskInputs = ensureNonEmptyArray<unknown>(args.tasks, 'tasks');
+
+    const results = await Promise.all(
+      taskInputs.map(async (rawTask) => {
+        const taskData = ensureObject<Record<string, unknown>>(rawTask, 'tasks[]');
+        const taskId = ensureUlid(taskData.task_id, 'tasks[].task_id');
+
+        try {
+          const updateParams: Record<string, unknown> = {};
+          const moveOptions: { projectId?: string; sectionId?: string | null; parentId?: string | null } = {};
+
+          const content = ensureOptionalString(taskData.content, 'tasks[].content');
+          if (content !== undefined) updateParams.content = content;
+
+          const description = ensureOptionalString(taskData.description, 'tasks[].description');
+          if (description !== undefined) updateParams.description = description;
+
+          const labels = ensureStringArray(taskData.labels, 'tasks[].labels');
+          if (labels !== undefined) updateParams.labels = labels;
+
+          const priority = ensureOptionalIntegerInRange(taskData.priority, 'tasks[].priority', 1, 4);
+          if (priority !== undefined) updateParams.priority = priority;
+
+          const dueString = ensureOptionalString(taskData.due_string, 'tasks[].due_string');
+          if (dueString !== undefined) updateParams.dueString = dueString;
+
+          const dueDate = ensureOptionalString(taskData.due_date, 'tasks[].due_date');
+          const dueDatetime = ensureOptionalString(taskData.due_datetime, 'tasks[].due_datetime');
+          if (dueDate !== undefined && dueDatetime !== undefined) {
+            throw new Error("tasks[].due_date and tasks[].due_datetime cannot both be provided");
+          }
+          if (dueDate !== undefined) updateParams.dueDate = dueDate;
+          if (dueDatetime !== undefined) updateParams.dueDatetime = dueDatetime;
+
+          const dueLang = ensureNullableString(taskData.due_lang, 'tasks[].due_lang');
+          if (dueLang !== undefined) updateParams.dueLang = dueLang;
+
+          const assigneeId = ensureNullableUlid(taskData.assignee_id, 'tasks[].assignee_id');
+          if (assigneeId !== undefined) updateParams.assigneeId = assigneeId;
+
+          const duration = ensureOptionalNumber(taskData.duration, 'tasks[].duration');
+          const durationUnit = ensureOptionalEnum(taskData.duration_unit, 'tasks[].duration_unit', ['minute', 'day'] as const);
+          if ((duration !== undefined && durationUnit === undefined) || (duration === undefined && durationUnit !== undefined)) {
+            throw new Error("tasks[].duration and tasks[].duration_unit must be provided together");
+          }
+          if (duration !== undefined && durationUnit !== undefined) {
+            updateParams.duration = duration;
+            updateParams.durationUnit = durationUnit;
+          }
+
+          const projectId = ensureOptionalUlid(taskData.project_id, 'tasks[].project_id');
+          if (projectId !== undefined) moveOptions.projectId = projectId;
+
+          const sectionId = ensureNullableUlid(taskData.section_id, 'tasks[].section_id');
+          if (sectionId !== undefined) moveOptions.sectionId = sectionId;
+
+          const parentId = ensureNullableUlid(taskData.parent_id, 'tasks[].parent_id');
+          if (parentId !== undefined) moveOptions.parentId = parentId;
+
+          if (Object.keys(updateParams).length === 0 && Object.keys(moveOptions).length === 0) {
+            throw new Error('tasks[] update payload contained no fields to update');
+          }
+
+                if (Object.keys(updateParams).length > 0) {
+            await this.todoistClient.updateTask(taskId, updateParams as any);
+          }
+
+          if (Object.keys(moveOptions).length > 0) {
+            await this.moveTodoistTask(taskId, moveOptions);
+          }
+
+              return {
+                    success: true,
+                    task_id: taskId,
+          };
+        } catch (error) {
+          console.error('Task update failed', { error, taskId, taskData });
+                      return {
+                        success: false,
+            task_id: taskId,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, taskInputs.length);
+  }
+
+  private async handleDeleteTasks(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const taskInputs = ensureNonEmptyArray<unknown>(args.tasks, 'tasks');
+
+    const results = await Promise.all(
+      taskInputs.map(async (rawTask) => {
+        const taskData = ensureObject<Record<string, unknown>>(rawTask, 'tasks[]');
+        const taskId = ensureUlid(taskData.task_id, 'tasks[].task_id');
+
+        try {
+                  await this.todoistClient.deleteTask(taskId);
+                  console.log('Task deleted', { taskId });
+                  return {
+                    success: true,
+                    task_id: taskId,
+                  };
+                } catch (error) {
+          console.error('Task deletion failed', { error, taskId });
+                  return {
+                    success: false,
+            task_id: taskId,
+                    error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, taskInputs.length);
+  }
+
+  private async handleCompleteTasks(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const taskInputs = ensureNonEmptyArray<unknown>(args.tasks, 'tasks');
+
+    const results = await Promise.all(
+      taskInputs.map(async (rawTask) => {
+        const taskData = ensureObject<Record<string, unknown>>(rawTask, 'tasks[]');
+        const taskId = ensureUlid(taskData.task_id, 'tasks[].task_id');
+
+        try {
+                  await this.todoistClient.closeTask(taskId);
+                  console.log('Task completed', { taskId });
+                  return {
+                    success: true,
+                    task_id: taskId,
+                  };
+                } catch (error) {
+          console.error('Task completion failed', { error, taskId });
+                  return {
+                    success: false,
+            task_id: taskId,
+                    error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, taskInputs.length);
+  }
+
+  private async handleGetProjects(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const projectIds = ensureUlidArray(args.project_ids, 'project_ids');
+    const includeSections = ensureOptionalBoolean(args.include_sections, 'include_sections') ?? false;
+    const includeHierarchy = ensureOptionalBoolean(args.include_hierarchy, 'include_hierarchy') ?? false;
+
+    let projects = await this.todoistClient.getProjects();
+    
+    // Convert any legacy numeric IDs to ULIDs
+    await this.convertProjectIdsToUlids(projects as any);
+    
+    if (projectIds) {
+      const idSet = new Set(projectIds);
+      projects = projects.filter(project => idSet.has(project.id));
+    }
+
+    let sectionsByProject: Record<string, { id: string; name: string; order: number }[]> = {};
+    if (includeSections && projects.length > 0) {
+      const allSections = await this.todoistClient.getSections();
+      await this.convertSectionIdsToUlids(allSections as any);
+      
+      sectionsByProject = allSections.reduce<Record<string, { id: string; name: string; order: number }[]>>((acc, section) => {
+        if (!acc[section.projectId]) {
+          acc[section.projectId] = [];
+        }
+        acc[section.projectId].push({
+          id: section.id,
+          name: section.name,
+          order: section.order,
+        });
+        return acc;
+      }, {});
+    }
+
+    let childrenByProject: Record<string, string[]> = {};
+    if (includeHierarchy) {
+      childrenByProject = projects.reduce<Record<string, string[]>>((acc, project) => {
+        if (project.parentId) {
+          if (!acc[project.parentId]) {
+            acc[project.parentId] = [];
+          }
+          acc[project.parentId].push(project.id);
+        }
+        return acc;
+      }, {});
+    }
+
+    const result = projects.map(project => {
+      const entry: Record<string, unknown> = {
+        id: project.id,
+        name: project.name,
+        color: project.color,
+        parent_id: project.parentId,
+        order: project.order,
+        comment_count: project.commentCount,
+        is_shared: project.isShared,
+        is_favorite: project.isFavorite,
+        is_inbox_project: project.isInboxProject,
+        is_team_inbox: project.isTeamInbox,
+        view_style: project.viewStyle,
+        url: project.url,
+      };
+
+      if (includeSections) {
+        entry.sections = sectionsByProject[project.id] ?? [];
+      }
+
+      if (includeHierarchy) {
+        entry.child_project_ids = childrenByProject[project.id] ?? [];
+      }
+
+      return entry;
+    });
+
+    return buildToolResponse({
+      success: true,
+      projects: result,
+    }, false);
+  }
+
+  private async handleCreateProjects(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const projectInputs = ensureNonEmptyArray<unknown>(args.projects, 'projects');
+
+    const results = await Promise.all(
+      projectInputs.map(async (rawProject) => {
+        const projectData = ensureObject<Record<string, unknown>>(rawProject, 'projects[]');
+        try {
+          const apiParams: Record<string, unknown> = {
+            name: ensureString(projectData.name, 'projects[].name'),
+          };
+
+          const parentId = ensureOptionalUlid(projectData.parent_id, 'projects[].parent_id');
+          if (parentId !== undefined) apiParams.parentId = parentId;
+
+          const color = ensureOptionalString(projectData.color, 'projects[].color');
+          if (color !== undefined) apiParams.color = color;
+
+          const favorite = ensureOptionalBoolean(projectData.favorite, 'projects[].favorite');
+          if (favorite !== undefined) apiParams.isFavorite = favorite;
+
+          const viewStyle = ensureOptionalEnum(projectData.view_style, 'projects[].view_style', ['list', 'board'] as const);
+          if (viewStyle !== undefined) apiParams.viewStyle = viewStyle;
+
+          const project = await this.todoistClient.addProject(apiParams as any);
+                  console.log('Project created', { projectId: project.id, name: project.name });
+                  return {
+                    success: true,
+                    project_id: project.id,
+            name: project.name,
+                  };
+                } catch (error) {
+          console.error('Project creation failed', { error, projectData });
+                  return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+            project: projectData,
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, projectInputs.length);
+  }
+
+  private async handleGetTaskComments(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const taskInputs = ensureNonEmptyArray<unknown>(args.tasks, 'tasks');
+
+    const results = await Promise.all(
+      taskInputs.map(async (rawTask) => {
+        const taskData = ensureObject<Record<string, unknown>>(rawTask, 'tasks[]');
+        const taskId = ensureUlid(taskData.task_id, 'tasks[].task_id');
+
+        try {
+          const comments = await this.todoistClient.getComments({ taskId });
+          return {
+            success: true,
+            task_id: taskId,
+            comments: comments.map(comment => ({
+              id: comment.id,
+              content: comment.content,
+              posted_at: comment.postedAt,
+            })),
+          };
+                } catch (error) {
+          console.error('Fetch task comments failed', { error, taskId });
+                  return {
+                    success: false,
+            task_id: taskId,
+                    error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, taskInputs.length);
+  }
+
+  private async handleCreateTaskComments(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const commentInputs = ensureNonEmptyArray<unknown>(args.comments, 'comments');
+
+    const results = await Promise.all(
+      commentInputs.map(async (rawComment) => {
+        const commentData = ensureObject<Record<string, unknown>>(rawComment, 'comments[]');
+        const taskId = ensureUlid(commentData.task_id, 'comments[].task_id');
+        const content = ensureString(commentData.content, 'comments[].content');
+
+        try {
+          const comment = await this.todoistClient.addComment({ taskId, content });
+          console.log('Comment created', { taskId, commentId: comment.id });
+          return {
+            success: true,
+            task_id: taskId,
+            comment: {
+              id: comment.id,
+              content: comment.content,
+              posted_at: comment.postedAt,
+            },
+          };
+                } catch (error) {
+          console.error('Create task comment failed', { error, taskId });
+                  return {
+                    success: false,
+            task_id: taskId,
+                    error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, commentInputs.length);
+  }
+
+  private async handleCreateSections(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const sectionInputs = ensureNonEmptyArray<unknown>(args.sections, 'sections');
+
+    const results = await Promise.all(
+      sectionInputs.map(async (rawSection) => {
+        const sectionData = ensureObject<Record<string, unknown>>(rawSection, 'sections[]');
+        const projectId = ensureUlid(sectionData.project_id, 'sections[].project_id');
+        const name = ensureString(sectionData.name, 'sections[].name');
+
+        try {
+          const apiParams: Record<string, unknown> = { name, projectId };
+          const order = ensureOptionalIntegerInRange(sectionData.order, 'sections[].order', 0, Number.MAX_SAFE_INTEGER);
+          if (order !== undefined) apiParams.order = order;
+
+          const section = await this.todoistClient.addSection(apiParams as any);
+                  console.log('Section created', { sectionId: section.id, projectId: section.projectId });
+                  return {
+                    success: true,
+                    section_id: section.id,
+            project_id: section.projectId,
+                    name: section.name,
+                  };
+                } catch (error) {
+          console.error('Create section failed', { error, sectionData });
+                  return {
+                    success: false,
+            project_id: projectId,
+            name,
+                    error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, sectionInputs.length);
+  }
+
+  private async handleRenameSections(rawArgs: unknown): Promise<ToolResponse> {
+    const args = ensureObject<Record<string, unknown>>(rawArgs ?? {}, 'arguments');
+    const sectionInputs = ensureNonEmptyArray<unknown>(args.sections, 'sections');
+
+    const results = await Promise.all(
+      sectionInputs.map(async (rawSection) => {
+        const sectionData = ensureObject<Record<string, unknown>>(rawSection, 'sections[]');
+        const sectionId = ensureUlid(sectionData.section_id, 'sections[].section_id');
+        const newName = ensureString(sectionData.new_name, 'sections[].new_name');
+
+        try {
+          const section = await this.todoistClient.updateSection(sectionId, { name: newName });
+                  console.log('Section renamed', { sectionId: section.id, newName: section.name });
+                  return {
+                    success: true,
+                    section_id: section.id,
+                    new_name: section.name,
+            project_id: section.projectId,
+                  };
+                } catch (error) {
+          console.error('Rename section failed', { error, sectionId });
+                  return {
+                    success: false,
+            section_id: sectionId,
+                    error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    return buildBatchResponse(results, sectionInputs.length);
+  }
+
   private setupExpress() {
-    // Configure CORS to expose Mcp-Session-Id header
+    this.app.set('trust proxy', true);
+    // Configure CORS to expose Mcp-Session-Id header and allow Authorization
     this.app.use(cors({
       origin: '*',
       exposedHeaders: ['Mcp-Session-Id'],
+      allowedHeaders: ['content-type', 'authorization', 'mcp-session-id'],
     }));
     
     this.app.use(express.json());
+    this.app.use(express.urlencoded({ extended: false }));
 
     // Health check endpoint (public)
     this.app.get('/health', (req, res) => {
       res.json({ status: 'ok', server: 'todoist-mcp-server-http' });
     });
 
+    this.app.get('/.well-known/mcp/manifest.json', (req, res) => {
+      const baseUrl = this.getBaseUrl(req);
+      res.json({
+        name: 'todoist-mcp-server-http',
+        version: '0.2.5',
+        description: 'Todoist MCP server providing project and task management tools over HTTP.',
+        transports: ['https'],
+        capabilities: {
+          tools: {
+            operations: ['list', 'call'],
+          },
+        },
+        oauth: {
+          type: 'authorization_code',
+          authorization_server: {
+            issuer: baseUrl,
+            authorization_endpoint: `${baseUrl}/oauth/authorize`,
+            token_endpoint: `${baseUrl}/oauth/token`,
+            registration_endpoint: `${baseUrl}/oauth/register`,
+          },
+          scopes: Array.from(SCOPES),
+        },
+      });
+    });
+
+    // OAuth discovery endpoints for MCP clients
+    this.app.get('/.well-known/oauth-authorization-server', (req, res) => {
+      const baseUrl = this.getBaseUrl(req);
+      res.json({
+        issuer: baseUrl,
+        authorization_endpoint: `${baseUrl}/oauth/authorize`,
+        token_endpoint: `${baseUrl}/oauth/token`,
+        registration_endpoint: `${baseUrl}/oauth/register`,
+        scopes_supported: Array.from(SCOPES),
+        response_types_supported: ['code'],
+        grant_types_supported: ['authorization_code'],
+        code_challenge_methods_supported: ['S256'],
+        token_endpoint_auth_methods_supported: ['none'],
+      });
+    });
+
+    this.app.get('/.well-known/oauth-protected-resource', (req, res) => {
+      const baseUrl = this.getBaseUrl(req);
+      res.json({
+        resource: 'todoist-mcp',
+        authorization_servers: [baseUrl],
+        scopes_supported: Array.from(SCOPES),
+      });
+    });
+
+    this.app.post('/oauth/register', (req, res) => {
+      const baseUrl = this.getBaseUrl(req);
+      const body = req.body || {};
+      console.log('Received OAuth client registration request');
+      const redirectUrisInput = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
+      const redirectUris = redirectUrisInput
+        .map((uri: unknown) => (typeof uri === 'string' ? uri.trim() : ''))
+        .filter((uri: string) => uri.length > 0);
+
+      if (redirectUris.length === 0) {
+        res.status(400).json({
+          error: 'invalid_client_metadata',
+          error_description: 'redirect_uris must be a non-empty array of HTTPS URLs',
+        });
+        return;
+      }
+
+      const unparsableUri = redirectUris.find((uri: string) => {
+        try {
+          // URL constructor supports custom schemes; we only care that the URI is absolute.
+          new URL(uri);
+          return false;
+        } catch (error) {
+          return true;
+        }
+      });
+      if (unparsableUri) {
+        res.status(400).json({
+          error: 'invalid_redirect_uri',
+          error_description: `Invalid redirect URI: ${unparsableUri}`,
+        });
+        return;
+      }
+
+      const requestedAuthMethod = typeof body.token_endpoint_auth_method === 'string'
+        ? body.token_endpoint_auth_method.toLowerCase()
+        : 'none';
+
+      if (!['none', 'client_secret_basic', 'client_secret_post'].includes(requestedAuthMethod)) {
+        res.status(400).json({
+          error: 'invalid_client_metadata',
+          error_description: `Unsupported token_endpoint_auth_method: ${requestedAuthMethod}`,
+        });
+        return;
+      }
+
+      if (requestedAuthMethod !== 'none') {
+        res.status(400).json({
+          error: 'invalid_client_metadata',
+          error_description: 'This server only supports public clients using PKCE (token_endpoint_auth_method="none")',
+        });
+        return;
+      }
+
+      const clientName = typeof body.client_name === 'string' ? body.client_name.trim() : undefined;
+      const requestedScope = typeof body.scope === 'string' ? body.scope : DEFAULT_SCOPE;
+      const normalizedScope = sanitizeScope(requestedScope);
+      const clientId = `mcp-client-${randomUUID()}`;
+      const registrationAccessToken = `reg_${randomUUID()}`;
+      const issuedAtSeconds = Math.floor(Date.now() / 1000);
+
+      registeredClients.set(clientId, {
+        clientId,
+        clientName,
+        redirectUris,
+        scope: normalizedScope,
+        tokenEndpointAuthMethod: 'none',
+        clientIdIssuedAt: issuedAtSeconds,
+        clientSecretExpiresAt: 0,
+        registrationAccessToken,
+      });
+
+      res.status(201).json({
+        client_id: clientId,
+        client_id_issued_at: issuedAtSeconds,
+        client_secret_expires_at: 0,
+        token_endpoint_auth_method: 'none',
+        registration_access_token: registrationAccessToken,
+        registration_client_uri: `${baseUrl}/oauth/register/${clientId}`,
+        redirect_uris: redirectUris,
+        scope: normalizedScope,
+        grant_types: ['authorization_code'],
+        response_types: ['code'],
+        client_name: clientName,
+      });
+    });
+
+    this.app.get('/oauth/authorize', (req, res) => {
+      const responseType = (getQueryParam(req.query.response_type as any) || 'code').toLowerCase();
+      console.log('Received OAuth authorize request', {
+        clientId: getQueryParam(req.query.client_id as any),
+        redirectUri: getQueryParam(req.query.redirect_uri as any),
+      });
+      if (responseType !== 'code') {
+        res.status(400).json({
+          error: 'unsupported_response_type',
+          error_description: 'Only response_type=code is supported',
+        });
+        return;
+      }
+
+      const clientId = getQueryParam(req.query.client_id as any);
+      const redirectUri = getQueryParam(req.query.redirect_uri as any);
+      const state = getQueryParam(req.query.state as any);
+      const codeChallenge = getQueryParam(req.query.code_challenge as any);
+      const codeChallengeMethod = (getQueryParam(req.query.code_challenge_method as any) || 'S256').toUpperCase();
+      const requestedScopeRaw = getQueryParam(req.query.scope as any);
+
+      if (!clientId || !redirectUri || !state || !codeChallenge) {
+        res.status(400).json({
+          error: 'invalid_request',
+          error_description: 'client_id, redirect_uri, state, and code_challenge are required',
+        });
+        return;
+      }
+
+      if (codeChallengeMethod !== 'S256') {
+        res.status(400).json({
+          error: 'invalid_request',
+          error_description: 'Only PKCE S256 code_challenge_method is supported',
+        });
+        return;
+      }
+
+      const requestedScopes = (requestedScopeRaw && requestedScopeRaw.trim()
+        ? requestedScopeRaw.trim()
+        : DEFAULT_SCOPE).split(/\s+/).filter(Boolean);
+      const normalizedRequestedScope = requestedScopes.length ? requestedScopes.join(' ') : DEFAULT_SCOPE;
+
+      let clientRegistration = registeredClients.get(clientId);
+      if (!clientRegistration) {
+        try {
+          const parsed = new URL(redirectUri);
+          if (!parsed.protocol) {
+            throw new Error('Missing protocol');
+          }
+        } catch (error) {
+          res.status(400).json({
+            error: 'invalid_request',
+            error_description: 'redirect_uri is invalid or missing',
+          });
+          return;
+        }
+
+        clientRegistration = {
+          clientId,
+          clientName: undefined,
+          redirectUris: [redirectUri],
+          scope: normalizedRequestedScope,
+          tokenEndpointAuthMethod: 'none',
+          clientIdIssuedAt: Math.floor(Date.now() / 1000),
+          clientSecretExpiresAt: 0,
+          registrationAccessToken: `auto_${randomUUID()}`,
+        };
+        registeredClients.set(clientId, clientRegistration);
+        console.warn('Auto-registered client from authorize request', { clientId, redirectUri });
+      }
+
+      if (!clientRegistration.redirectUris.includes(redirectUri)) {
+        res.status(400).json({
+          error: 'invalid_request',
+          error_description: 'redirect_uri is not registered for this client',
+        });
+        return;
+      }
+
+      const allowedScopes = new Set(clientRegistration.scope.split(/\s+/).filter(Boolean));
+      const invalidRequestedScopes = requestedScopes.filter(scope => !allowedScopes.has(scope));
+      if (invalidRequestedScopes.length > 0) {
+        res.status(400).json({
+          error: 'invalid_scope',
+          error_description: `Scope not allowed: ${invalidRequestedScopes.join(', ')}`,
+        });
+        return;
+      }
+
+      const invalidScopes = requestedScopes.filter(scope => !(SCOPES as readonly string[]).includes(scope));
+      if (invalidScopes.length > 0) {
+        res.status(400).json({
+          error: 'invalid_scope',
+          error_description: `Unsupported scope(s): ${invalidScopes.join(', ')}`,
+        });
+        return;
+      }
+      const normalizedScope = requestedScopes.length ? requestedScopes.join(' ') : clientRegistration.scope;
+
+      const githubClientId = process.env.GITHUB_OAUTH_CLIENT_ID;
+      const githubCallbackUrl = process.env.GITHUB_OAUTH_CALLBACK_URL;
+
+      if (!githubClientId || !githubCallbackUrl) {
+        res.status(500).json({
+          error: 'server_error',
+          error_description: 'GitHub OAuth not configured',
+        });
+        return;
+      }
+
+      const githubState = randomUUID();
+      pendingAuthStates.set(githubState, {
+        type: 'oauth',
+        clientId,
+        redirectUri,
+        codeChallenge,
+        codeChallengeMethod: 'S256',
+        scope: normalizedScope,
+        originalState: state,
+        createdAt: Date.now(),
+      });
+
+      const params = new URLSearchParams({
+        client_id: githubClientId,
+        redirect_uri: githubCallbackUrl,
+        scope: 'read:user',
+        state: githubState,
+      });
+
+      res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
+    });
+
+    this.app.post('/oauth/token', (req, res) => {
+      console.log('Received OAuth token exchange request');
+      const { grant_type: grantType, code, redirect_uri: redirectUri, client_id: clientId, code_verifier: codeVerifier } =
+        req.body || {};
+
+      const authCode = typeof code === 'string' ? code : String(code || '');
+      const redirect = typeof redirectUri === 'string' ? redirectUri : String(redirectUri || '');
+      const client = typeof clientId === 'string' ? clientId : String(clientId || '');
+      const verifier = typeof codeVerifier === 'string' ? codeVerifier : String(codeVerifier || '');
+
+      if (grantType !== 'authorization_code') {
+        res.status(400).json({
+          error: 'unsupported_grant_type',
+          error_description: 'Only authorization_code grant type is supported',
+        });
+        return;
+      }
+
+      if (!authCode || !redirect || !client || !verifier) {
+        res.status(400).json({
+          error: 'invalid_request',
+          error_description: 'code, redirect_uri, client_id, and code_verifier are required',
+        });
+        return;
+      }
+
+      const record = authorizationCodes.get(authCode);
+      if (!record) {
+        res.status(400).json({
+          error: 'invalid_grant',
+          error_description: 'Unknown authorization code',
+        });
+        return;
+      }
+
+      if (record.clientId !== client || record.redirectUri !== redirect) {
+        authorizationCodes.delete(authCode);
+        res.status(400).json({
+          error: 'invalid_grant',
+          error_description: 'Client or redirect URI mismatch',
+        });
+        return;
+      }
+
+      if (Date.now() > record.expiresAt) {
+        authorizationCodes.delete(authCode);
+        res.status(400).json({
+          error: 'invalid_grant',
+          error_description: 'Authorization code has expired',
+        });
+        return;
+      }
+
+      const expectedChallenge = sha256Base64Url(verifier);
+      if (expectedChallenge !== record.codeChallenge) {
+        authorizationCodes.delete(authCode);
+        res.status(400).json({
+          error: 'invalid_grant',
+          error_description: 'PKCE verification failed',
+        });
+        return;
+      }
+
+      const registeredClient = registeredClients.get(record.clientId);
+      if (!registeredClient) {
+        authorizationCodes.delete(authCode);
+        res.status(400).json({
+          error: 'invalid_client',
+          error_description: 'Client is not registered',
+        });
+        return;
+      }
+
+      authorizationCodes.delete(authCode);
+
+      const accessToken = `mcp_${randomUUID()}`;
+      issuedTokens.set(accessToken, {
+        user: record.user,
+        createdAt: Date.now(),
+        scope: record.scope,
+        expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
+      });
+
+      res.json({
+        access_token: accessToken,
+        token_type: 'Bearer',
+        expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
+        scope: record.scope,
+      });
+    });
+
+    // GitHub OAuth login (redirect to GitHub)
+    this.app.get('/auth/github/login', (req, res) => {
+      const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
+      const callbackUrl = process.env.GITHUB_OAUTH_CALLBACK_URL;
+      if (!clientId || !callbackUrl) {
+        res.status(500).send('GitHub OAuth not configured');
+        return;
+      }
+      const requestedScope = sanitizeScope(getQueryParam(req.query.scope as any));
+      const state = randomUUID();
+      pendingAuthStates.set(state, {
+        type: 'manual',
+        createdAt: Date.now(),
+        scope: requestedScope,
+      });
+      const params = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: callbackUrl,
+        scope: 'read:user',
+        state,
+      });
+      res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
+    });
+
+    // GitHub OAuth callback: exchange code for token, then mint an API key for MCP
+    this.app.get('/auth/github/callback', async (req, res) => {
+      try {
+        const errorParam = getQueryParam(req.query.error as any);
+        if (errorParam) {
+          console.warn('GitHub callback error', { error: errorParam, state: getQueryParam(req.query.state as any) });
+          res.status(400).send(`GitHub OAuth declined: ${errorParam}`);
+          return;
+        }
+
+        const codeParam = getQueryParam(req.query.code as any);
+        const stateParam = getQueryParam(req.query.state as any);
+
+        console.log('GitHub callback received', { hasCode: !!codeParam, state: stateParam });
+
+        if (!codeParam || !stateParam) {
+          console.warn('GitHub callback missing code/state', { codeParam, stateParam });
+          res.status(400).send('OAuth callback missing code or state');
+          return;
+        }
+
+        const authState = pendingAuthStates.get(stateParam);
+        pendingAuthStates.delete(stateParam);
+
+        if (!authState) {
+          console.warn('GitHub callback with unknown state', { stateParam });
+          res.status(400).send('Invalid or expired OAuth state');
+          return;
+        }
+
+        if (Date.now() - authState.createdAt > 15 * 60 * 1000) {
+          console.warn('GitHub callback state expired', { stateParam });
+          res.status(400).send('OAuth session expired');
+          return;
+        }
+
+        const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
+        const clientSecret = process.env.GITHUB_OAUTH_SECRET;
+        const callbackUrl = process.env.GITHUB_OAUTH_CALLBACK_URL;
+        if (!clientId || !clientSecret || !callbackUrl) {
+          res.status(500).send('GitHub OAuth not configured');
+          return;
+        }
+
+        const tokenResp = await fetch('https://github.com/login/oauth/access_token', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code: codeParam, redirect_uri: callbackUrl }),
+        });
+        if (!tokenResp.ok) {
+          console.error('GitHub token exchange failed', { status: tokenResp.status });
+          res.status(502).send('Failed to exchange code');
+          return;
+        }
+        const tokenJson: any = await tokenResp.json();
+        const ghAccessToken = tokenJson.access_token as string | undefined;
+        if (!ghAccessToken) {
+          console.warn('GitHub token payload missing access_token', tokenJson);
+          res.status(401).send('No GitHub access token received');
+          return;
+        }
+
+        const userResp = await fetch('https://api.github.com/user', {
+          headers: { Authorization: `Bearer ${ghAccessToken}`, 'user-agent': 'todoist-mcp-server' },
+        });
+        const userJson: any = userResp.ok ? await userResp.json() : {};
+        const login = userJson.login || 'github-user';
+        console.log('GitHub user fetched', { login });
+
+        if (authState.type === 'manual') {
+          const apiToken = `mcp_${randomUUID()}`;
+          issuedTokens.set(apiToken, {
+            user: login,
+            createdAt: Date.now(),
+            scope: authState.scope,
+            expiresAt: null,
+          });
+          console.log('Manual auth token issued', { login, scope: authState.scope });
+
+          res.setHeader('content-type', 'text/html; charset=utf-8');
+          res.send(`<!DOCTYPE html>
+<html>
+  <head><meta charset="utf-8"/><title>Todoist MCP - API Token</title></head>
+  <body>
+    <h1>Authentication complete</h1>
+    <p>Signed in as: <strong>${login}</strong></p>
+    <p>Use the following API token in your MCP client configuration as an HTTP header:</p>
+    <pre>Authorization: Bearer ${apiToken}</pre>
+    <p>Scope: ${authState.scope}</p>
+    <p>You can now configure Claude or OpenAI MCP clients to call your MCP endpoint with that header.</p>
+  </body>
+</html>`);
+          return;
+        }
+
+        if (authState.type === 'oauth') {
+          const authCode = randomUUID();
+          authorizationCodes.set(authCode, {
+            clientId: authState.clientId,
+            redirectUri: authState.redirectUri,
+            codeChallenge: authState.codeChallenge,
+            codeChallengeMethod: authState.codeChallengeMethod,
+            scope: authState.scope,
+            user: login,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + AUTH_CODE_TTL_MS,
+          });
+          console.log('Issued authorization code', { clientId: authState.clientId, redirectUri: authState.redirectUri });
+
+          try {
+            const redirectTarget = new URL(authState.redirectUri);
+            redirectTarget.searchParams.set('code', authCode);
+            redirectTarget.searchParams.set('state', authState.originalState);
+            res.redirect(redirectTarget.toString());
+          } catch (error) {
+            console.error('Failed to redirect to client', { redirectUri: authState.redirectUri, error });
+            authorizationCodes.delete(authCode);
+            res.status(400).send('Invalid redirect_uri');
+          }
+          return;
+        }
+
+        console.error('Unknown auth state type', { authState });
+        res.status(500).send('Unexpected authentication flow');
+      } catch (e) {
+        console.error('OAuth callback error', e);
+        res.status(500).send('OAuth callback error');
+      }
+    });
+
     // MCP Streamable HTTP endpoint (handles GET, POST, DELETE)
     this.app.all('/mcp', async (req, res) => {
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+
+      const authHeader = req.headers['authorization'] as string | undefined;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        this.sendUnauthorized(req, res, 'Missing bearer token');
+        return;
+      }
+
+      const token = authHeader.slice('Bearer '.length).trim();
+      if (!token || !isTokenAuthorized(token)) {
+        this.sendUnauthorized(req, res, 'Invalid or expired bearer token');
+        return;
+      }
+
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
       console.log(`Received ${req.method} request to /mcp`, {
         sessionId,
@@ -1667,6 +2149,28 @@ class TodoistMCPServer {
       console.log(`Todoist MCP Server HTTP running on http://${host}:${port}`);
       console.log(`Health check: http://${host}:${port}/health`);
       console.log(`MCP endpoint: http://${host}:${port}/mcp`);
+    });
+  }
+
+  private getBaseUrl(req: express.Request): string {
+    const forwardedProto = getQueryParam(req.headers['x-forwarded-proto'] as any);
+    const protocol = forwardedProto ? forwardedProto.split(',')[0].trim() : req.protocol;
+    const forwardedHost = getQueryParam(req.headers['x-forwarded-host'] as any);
+    const host = forwardedHost || req.headers.host || `${process.env.HOST || '0.0.0.0'}:${process.env.PORT || '8766'}`;
+    return `${protocol}://${host}`;
+  }
+
+  private sendUnauthorized(req: express.Request, res: express.Response, message: string) {
+    const baseUrl = this.getBaseUrl(req);
+    const headerValue = `Bearer realm="todoist-mcp", authorization_uri="${baseUrl}/oauth/authorize", token_uri="${baseUrl}/oauth/token", scope="${DEFAULT_SCOPE}", registration_uri="${baseUrl}/oauth/register"`;
+    res.setHeader('WWW-Authenticate', headerValue);
+    res.status(401).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32001,
+        message,
+      },
+      id: null,
     });
   }
 }

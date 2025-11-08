@@ -36,10 +36,60 @@ This is a **complete architectural rewrite** from the original stdio-based MCP s
 - **Project Management**: Create and manage Todoist projects
 - **Comments Support**: Add and retrieve task comments
 - **Batch Operations**: Handle multiple tasks/projects at once
-- **Smart Search**: Find tasks by name when ID not available
+- **ULID-First Architecture**: Modern ULID identifiers with automatic legacy ID conversion
 - **GitHub Authentication**: Secure access via OAuth
 - **Docker Ready**: Containerized deployment
 - **Health Monitoring**: Built-in health checks
+
+## 🤖 Using with OpenAI (ChatGPT Desktop)
+
+This server exposes MCP over HTTP and is compatible with OpenAI clients that support MCP.
+
+1. Start the server locally or use your deployed URL. Defaults:
+   - Health: `https://todoist.ssc.one/health`
+   - MCP: `https://todoist.ssc.one/mcp`
+2. Authenticate and get an API token (recommended):
+
+   - Visit: `https://todoist.ssc.one/auth/github/login`
+   - After GitHub OAuth completes, copy the issued API token shown on the page.
+
+3. Configure your OpenAI client’s MCP settings to include the Authorization header:
+
+```json
+{
+  "mcpServers": {
+    "todoist": {
+      "type": "http",
+      "url": "https://todoist.ssc.one/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_ISSUED_TOKEN"
+      }
+    }
+  }
+}
+```
+
+See `doc/Howto - Setting up OpenAI Todoist MCP.md` for details. This is additive and does not change existing Claude support.
+
+## 🧑‍💻 Using with Claude (Desktop)
+
+Claude can target the same HTTP MCP endpoint. Add or update the Claude Desktop config to include the Authorization header after obtaining a token via `https://todoist.ssc.one/auth/github/login`:
+
+```json
+{
+  "mcpServers": {
+    "todoist": {
+      "type": "http",
+      "url": "https://todoist.ssc.one/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_ISSUED_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Alternative for CI/headless: set a pre-shared token in `MCP_ALLOWED_TOKENS` and use that value in your client headers. This avoids hardcoding secrets in code or commits.
 
 ## 📋 Available Tools
 
@@ -52,6 +102,8 @@ This is a **complete architectural rewrite** from the original stdio-based MCP s
 - `todoist_create_project` - Create single or batch projects
 - `todoist_get_task_comments` - Get task comments
 - `todoist_create_task_comment` - Add task comments
+
+**Note on IDs**: This server uses ULID identifiers exclusively. If your Todoist account still uses legacy numeric IDs (common for accounts created before 2024), the server automatically converts them to ULIDs using Todoist's Sync API v9 `id_mappings` endpoint. All responses will contain ULIDs, ensuring consistency across all operations. Request a migration to ULIDs via Todoist support for native ULID support.
 
 ## 🐳 Docker Deployment
 
@@ -70,6 +122,10 @@ TODOIST_API_TOKEN=your_todoist_api_token
 GITHUB_CLIENT_ID=your_github_client_id
 GITHUB_CLIENT_SECRET=your_github_client_secret
 GITHUB_CALLBACK_URL=http://localhost:8766/auth/github/callback
+# Optional: pre-shared MCP tokens (comma-separated) for CI/tests or headless clients
+MCP_ALLOWED_TOKENS=token_for_ci,another_token
+# Used by tests and local tooling to authorize calls against /mcp
+GITHUB_OAUTH_BEARER_TOKEN=token_for_ci
 ```
 
 ### Docker Compose
@@ -139,11 +195,32 @@ npm install
 npm run build
 
 # Run tests
-npm test
+MCP_TEST_TARGET=remote npm test
 
 # Type check
 npm run build:check
 ```
+
+### Testing modes
+
+- `MCP_TEST_TARGET=remote` (default) exercises the deployed server at `https://todoist.ssc.one`.  
+  Use when running on the host or CI without Docker access. Requires network connectivity.
+- `MCP_TEST_TARGET=local` runs the compiled server in-process on `127.0.0.1`.  
+  Use only inside the Docker container (`docker exec`) where binding to localhost is permitted.
+- `MCP_E2E_ENABLED=1` runs the optional ULID end-to-end test (`tests/tools/external-e2e.test.js`).  
+  Requires `MCP_E2E_BEARER_TOKEN` (or `MCP_ALLOWED_TOKENS`) and `TODOIST_API_TOKEN` for cleanup.
+
+If `MCP_TEST_TARGET=remote` cannot reach the deployment (for example, due to missing network access), the integration suites automatically skip and emit a warning.
+
+### Docker release checklist
+
+1. `npm install`
+2. `npm run build`
+3. `MCP_TEST_TARGET=remote npm test` (and `MCP_E2E_ENABLED=1` when running in staging with valid credentials)
+4. `docker build -t todoist-mcp-server-http .`
+5. `docker push todoist-mcp-server-http` *(replace with your registry tag when ready)*
+
+Only push after the TypeScript build, remote integration tests, and the optional ULID end-to-end test (when enabled) all succeed.
 
 ### Scripts
 

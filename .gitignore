@@ -11,6 +11,9 @@ project-resources/
 # Environment variables
 .env
 
+# Cloudflared credentials
+.cloudflared/
+
 # IDE and OS files
 .DS_Store
 .vscode/

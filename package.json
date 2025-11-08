@@ -15,12 +15,14 @@
     "build": "tsc && shx chmod +x dist/*.js",
     "build:check": "tsc --noEmit",
     "lint": "echo 'No linter configured'",
+    "pretest": "npm run build",
     "test": "node --test tests/**/*.test.js",
     "test:watch": "node --test --watch tests/**/*.test.js",
     "prebuild": "npm run build:check",
     "prepack": "npm run build:check && npm test",
     "docker:build": "npm run build:check && npm test && npm run build && docker build -t todoist-mcp-server-http .",
-    "docker:build:fast": "npm run build && docker build -t todoist-mcp-server-http ."
+    "docker:build:fast": "npm run build && docker build -t todoist-mcp-server-http .",
+    "debug:update-task": "node scripts/manual/repro-update-task.mjs"
   },
   "repository": {
     "type": "git",

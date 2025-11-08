@@ -1,5 +1,5 @@
-tunnel: 6aeeaf0d-6feb-4ab8-82e3-4ce1effdbec8
-credentials-file: /root/.cloudflared/6aeeaf0d-6feb-4ab8-82e3-4ce1effdbec8.json
+tunnel: d5271465-64e4-44ef-b031-53285d8da722
+credentials-file: /root/.cloudflared/d5271465-64e4-44ef-b031-53285d8da722.json
 
 ingress:
   - hostname: todoist.ssc.one

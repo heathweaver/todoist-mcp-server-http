@@ -29,6 +29,11 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json .
 COPY --from=builder /app/package-lock.json .
 
+# Copy cloudflared config and credentials
+COPY config.yml /etc/cloudflared/config.yml
+COPY .cloudflared/cloudflared-creds.json /root/.cloudflared/d5271465-64e4-44ef-b031-53285d8da722.json
+COPY .cloudflared/cert.pem /root/.cloudflared/cert.pem
+
 # Install production dependencies
 RUN npm ci --omit=dev
 
@@ -44,8 +49,12 @@ RUN wget https://github.com/cloudflare/cloudflared/releases/latest/download/clou
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "console.log('OK')" || exit 1
 
+# Copy cloudflared startup script
+COPY cloudflared.sh /usr/local/bin/cloudflared.sh
+RUN chmod +x /usr/local/bin/cloudflared.sh
+
 # Expose the port that the server listens to
 EXPOSE 8766
 
-# Command to run the server
-ENTRYPOINT ["node", "dist/index.js"]
+# Start both cloudflared and the node server
+CMD ["/bin/sh", "-c", "/usr/local/bin/cloudflared.sh && node dist/index.js"]
