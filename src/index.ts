@@ -456,6 +456,16 @@ class TodoistMCPServer {
     }
   }
 
+  private async convertSingleProjectId(projectId: string): Promise<string> {
+    // If already ULID, return as-is
+    if (!this.isLegacyNumericId(projectId)) {
+      return projectId;
+    }
+    // Convert numeric ID to ULID
+    const mappings = await this.mapLegacyIdsToUlids('projects', [projectId]);
+    return mappings[projectId] || projectId;
+  }
+
   private async convertSectionIdsToUlids(sections: Array<{ id: string; projectId?: string | null; [key: string]: unknown }>): Promise<void> {
     const sectionIds = sections.map(s => s.id).filter(id => this.isLegacyNumericId(id));
     const projectIds = sections.map(s => s.projectId).filter(id => this.isLegacyNumericId(id)) as string[];
@@ -1349,7 +1359,17 @@ class TodoistMCPServer {
           };
 
           const parentId = ensureOptionalUlid(projectData.parent_id, 'projects[].parent_id');
-          if (parentId !== undefined) apiParams.parentId = parentId;
+          if (parentId !== undefined) {
+            // Convert numeric parent_id to ULID if necessary
+            const convertedParentId = await this.convertSingleProjectId(parentId);
+            console.log('Project parent_id conversion:', {
+              original: parentId,
+              converted: convertedParentId,
+              wasNumeric: this.isLegacyNumericId(parentId),
+              conversionNeeded: parentId !== convertedParentId
+            });
+            apiParams.parentId = convertedParentId;
+          }
 
           const color = ensureOptionalString(projectData.color, 'projects[].color');
           if (color !== undefined) apiParams.color = color;
@@ -1360,6 +1380,7 @@ class TodoistMCPServer {
           const viewStyle = ensureOptionalEnum(projectData.view_style, 'projects[].view_style', ['list', 'board'] as const);
           if (viewStyle !== undefined) apiParams.viewStyle = viewStyle;
 
+          console.log('Creating project with params:', { name: apiParams.name, parentId: apiParams.parentId });
           const project = await this.todoistClient.addProject(apiParams as any);
                   console.log('Project created', { projectId: project.id, name: project.name });
                   return {

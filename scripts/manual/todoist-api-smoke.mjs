@@ -213,6 +213,23 @@ async function main() {
     ensureCleanup('projects', projectB.id);
     prettyPrint('Project B created', projectB);
 
+    // Test sub-project creation (parent_id with numeric ID)
+    console.log('\n--- Testing Sub-Project Creation ---');
+    const subProjectName = `${projectAName} - Child`;
+    let subProject;
+    try {
+      subProject = await call('POST', '/projects', {
+        body: { name: subProjectName, parent_id: projectA.id },
+        label: 'create sub-project'
+      });
+      console.log(`✅ Sub-project created: ${subProject.id} (${detectIdType(subProject.id)}) under parent ${projectA.id}`);
+      ensureCleanup('projects', subProject.id);
+      prettyPrint('Sub-project created', subProject);
+    } catch (error) {
+      console.error(`❌ Sub-project creation failed: ${error instanceof Error ? error.message : error}`);
+      console.log('This is expected if parent_id is numeric and API expects ULID');
+    }
+
     const projects = await call('GET', '/projects', { label: 'get projects' });
     prettyPrint('Projects list', projects.filter(p => p.name.includes('MCP Smoke Project')));
 
